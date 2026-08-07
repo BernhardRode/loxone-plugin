@@ -1,0 +1,86 @@
+#!/usr/bin/env node
+
+const fs = require("fs");
+const path = require("path");
+const source = fs
+  .readFileSync(path.join(__dirname, "..", "EntityStore.js"), "utf8")
+  .replace(/^\.pragma library\s*$/m, "");
+const names = [...source.matchAll(/^function\s+([A-Za-z0-9_]+)/gm)].map((m) => m[1]);
+const Store = new Function(`${source}\nreturn {${names.join(",")}};`)();
+
+let failures = 0;
+let checks = 0;
+function eq(label, actual, expected) {
+  checks++;
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    failures++;
+    console.log(`  FAIL ${label}\n       got      ${JSON.stringify(actual)}` +
+                `\n       expected ${JSON.stringify(expected)}`);
+  }
+}
+
+console.log("entity store projections");
+const indexed = Store.indexStates([
+  { entity_id: "light.a", state: "on" },
+  null,
+  { entity_id: "", state: "off" },
+  { entity_id: "__proto__", state: "hostile" },
+  { entity_id: "sensor.b", state: "4" }
+]);
+eq("valid states are indexed", Object.keys(indexed), ["light.a", "sensor.b"]);
+
+// Replacing a known entity is the hot path — hundreds of sensor updates a
+// second on a real instance — so it updates in place rather than rebuilding
+// the map. Identity only changes when the set of entities does.
+const updated = Store.upsertState(indexed, { entity_id: "light.a", state: "off" });
+eq("replacing a known entity keeps the same map", updated === indexed, true);
+eq("upsert replaces one entity", updated["light.a"].state, "off");
+eq("a new entity gets a fresh map, so `states` identity tracks the entity set",
+   Store.upsertState(updated, { entity_id: "light.new", state: "on" }) === updated,
+   false);
+eq("the new entity is present",
+   Object.keys(Store.upsertState(updated, { entity_id: "light.new", state: "on" })),
+   ["light.a", "sensor.b", "light.new"]);
+eq("a rejected entity id leaves the map alone",
+   Store.upsertState(updated, { entity_id: "__proto__", state: "hostile" }) === updated,
+   true);
+const removed = Store.removeState(updated, "sensor.b");
+eq("remove returns a new map without the entity", Object.keys(removed), ["light.a"]);
+eq("remove leaves the input map intact", Object.keys(updated), ["light.a", "sensor.b"]);
+
+const registries = Store.projectRegistries(
+  [{ area_id: "k", name: "Kitchen" }, { area_id: "h", name: "Hall" }],
+  [{ entity_id: "light.a", device_id: "d1" },
+   { entity_id: "sensor.b", device_id: "d2", area_id: "h" }],
+  [{ id: "d1", area_id: "k" }, { id: "d2", area_id: "k" }]
+);
+eq("area names are projected", registries.areaNames, { k: "Kitchen", h: "Hall" });
+eq("entity area wins over its device",
+   registries.entityArea, { "light.a": "k", "sensor.b": "h" });
+
+eq("display names drive the stable index",
+   Store.sortedIds(indexed, (id) => id === "sensor.b" ? "Alpha" : "Zulu"),
+   ["sensor.b", "light.a"]);
+
+const tabs = Store.computeTabs(
+  ["light.a", "sensor.b", "switch.missing"], true,
+  registries.areaNames, registries.entityArea
+);
+eq("favorites remain the first complete tab", tabs[0].entityIds,
+   ["light.a", "sensor.b", "switch.missing"]);
+eq("areas are alphabetical", tabs.slice(1, 3).map((tab) => tab.title),
+   ["Hall", "Kitchen"]);
+eq("unassigned favorites remain visible",
+   tabs[tabs.length - 1],
+   { id: "other", title: "Other", entityIds: ["switch.missing"] });
+
+eq("flat mode doesn't depend on registry readiness",
+   Store.computeTabs(["light.a"], false, {}, {}),
+   [{ id: "favorites", title: "Favorites", entityIds: ["light.a"] }]);
+
+console.log();
+if (failures) {
+  console.log(`FAILED: ${failures} of ${checks} checks`);
+  process.exit(1);
+}
+console.log(`all ${checks} checks passed`);

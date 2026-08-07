@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "hass",
+  "name": "Home Assistant",
+  "version": "0.2.0",
+  "author": "Konrad Kruk",
+  "license": "MIT",
+  "description": "View and control Home Assistant devices from the Omarchy bar.",
+  "kinds": [
+    "service",
+    "bar-widget",
+    "overlay"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml",
+    "overlay": "Settings.qml"
+  },
+  "barWidget": {
+    "displayName": "Home Assistant",
+    "description": "Favorites-first control of Home Assistant entities.",
+    "category": "Home",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
