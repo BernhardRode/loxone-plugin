@@ -242,7 +242,8 @@ def demo_initial_states():
             "friendly_name": "Living Room Thermostat", "hvac_action": "heating",
             "current_temperature": 21.4, "temperature": 22.0,
             "target_temp_step": 0.5, "min_temp": 16.0, "max_temp": 30.0,
-            "supported_features": 1}),
+            # TARGET_TEMPERATURE | TURN_OFF | TURN_ON
+            "supported_features": 1 | 128 | 256}),
         entity("media_player.living_room_tv", "playing", {
             "friendly_name": "Living Room TV", "icon": "mdi:television",
             "device_class": "tv", "volume_level": 0.42,
@@ -391,6 +392,12 @@ class DemoTransport:
                 # Home Assistant drops brightness to null on a dark light, which
                 # is exactly when brightness must not be read as "not dimmable".
                 self._set_attrs(entity_id, {"brightness": None, "color_mode": None})
+        elif pair == ("climate", "turn_on"):
+            self._set_state(entity_id, "heat")
+            self._set_attrs(entity_id, {"hvac_action": "idle"})
+        elif pair == ("climate", "turn_off"):
+            self._set_state(entity_id, "off")
+            self._set_attrs(entity_id, {"hvac_action": "off"})
         elif pair == ("homeassistant", "toggle"):
             current = (self._states[entity_id].get("state") or "off").lower()
             nxt = "off" if current in ("on", "playing", "open", "unlocked") else "on"

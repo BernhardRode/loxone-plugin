@@ -727,7 +727,10 @@ QtObject {
 
   function recomputeExpandable() {
     for (var i = 0; i < rows.count; i++) {
-      if (rows.get(i).expandable) { root.rowsHaveExpandable = true; return }
+      if (rows.get(i).reserveExpandSlot) {
+        root.rowsHaveExpandable = true
+        return
+      }
     }
     root.rowsHaveExpandable = false
   }
