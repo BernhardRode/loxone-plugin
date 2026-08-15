@@ -58,6 +58,10 @@ section("on/off semantics", () => {
   eq("off", Model.isOn(entity("light.a", "off")), false);
   eq("closed is off", Model.isOn(entity("cover.a", "closed")), false);
   eq("unlocked is off", Model.isOn(entity("lock.a", "unlocked")), false);
+  eq("a climate HVAC mode is on", Model.isOn(entity("climate.a", "heat")), true);
+  eq("climate off is off", Model.isOn(entity("climate.a", "off")), false);
+  eq("unavailable climate is not on",
+     Model.isOn(entity("climate.a", "unavailable")), false);
 });
 
 section("state text", () => {
@@ -241,6 +245,12 @@ section("demo starter picks match the demo house", () => {
 section("control classification", () => {
   eq("light is a toggle", Model.controlKind(entity("light.a", "on")), "toggle");
   eq("humidifier is a toggle", Model.controlKind(entity("humidifier.a", "on")), "toggle");
+  eq("climate with turn-off support is a toggle",
+     Model.controlKind(entity("climate.a", "heat", { supported_features: 128 })),
+     "toggle");
+  eq("climate without the required turn-off support is not a toggle",
+     Model.controlKind(entity("climate.a", "heat", { supported_features: 256 })),
+     "none");
   eq("lock is its own kind", Model.controlKind(entity("lock.a", "locked")), "lock");
   eq("scene is one-shot", Model.controlKind(entity("scene.a", "unknown")), "activate");
   eq("script is one-shot", Model.controlKind(entity("script.a", "off")), "activate");
@@ -300,6 +310,26 @@ section("entity capabilities", () => {
     supported_features: 2
   }));
   eq("a missing target range isn't invented", missingRange.climateRange, false);
+  eq("a missing live climate target still reserves stable row geometry",
+     missingRange.reserveExpandSlot, true);
+  eq("a missing live climate target does not enable empty controls",
+     missingRange.expandable, false);
+
+  const climateOn = Model.capabilitiesFor(entity("climate.a", "heat", {
+    supported_features: 1 | 128 | 256, temperature: 22
+  }));
+  eq("an active climate entity exposes turn off", climateOn.toggle, true);
+
+  const climateOff = Model.capabilitiesFor(entity("climate.a", "off", {
+    supported_features: 1 | 128 | 256, temperature: 22
+  }));
+  eq("an off climate entity exposes turn on", climateOff.toggle, true);
+
+  const oneWayClimate = Model.capabilitiesFor(entity("climate.a", "off", {
+    supported_features: 128
+  }));
+  eq("climate does not invent an unsupported turn-on action",
+     oneWayClimate.toggle, false);
 
   const unavailable = Model.capabilitiesFor(entity("cover.a", "unavailable", {
     supported_features: 1 | 2 | 8
@@ -314,6 +344,12 @@ section("service calls", () => {
      Model.toggleCall(entity("light.a", "on"), true), { domain: "light", service: "turn_off" });
   eq("a light off turns on",
      Model.toggleCall(entity("light.a", "off"), false), { domain: "light", service: "turn_on" });
+  eq("an active climate entity turns off through its own domain",
+     Model.toggleCall(entity("climate.a", "heat", { supported_features: 128 }), true),
+     { domain: "climate", service: "turn_off" });
+  eq("an off climate entity turns on through its own domain",
+     Model.toggleCall(entity("climate.a", "off", { supported_features: 256 }), false),
+     { domain: "climate", service: "turn_on" });
   // Anything outside the known list still gets a sensible attempt.
   eq("an unknown domain falls back",
      Model.toggleCall(entity("water_heater.a", "on"), true),

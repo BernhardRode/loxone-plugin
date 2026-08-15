@@ -45,6 +45,34 @@ eq("capabilities control expansion", row.expandable, true);
 eq("a cover has no primary toggle", row.control, "none");
 eq("optimistic state reaches the row", [row.isOn, row.pending], [false, true]);
 
+const climate = {
+  entity_id: "climate.hallway",
+  state: "heat",
+  attributes: { supported_features: 1 | 128 | 256, temperature: 22 }
+};
+const climateRow = Rows.project(climate.entity_id, climate, {
+  name: "Hallway", icon: "T", isOn: true, pending: false,
+  temperatureUnit: "°C", entityArea: {}, areaNames: {}
+}, Model);
+eq("climate turn-on/off support projects a primary toggle",
+   climateRow.control, "toggle");
+eq("climate keeps its temperature expansion", climateRow.expandable, true);
+
+const climateWithoutTarget = {
+  entity_id: "climate.hallway",
+  state: "off",
+  attributes: { supported_features: 1 | 128 | 256, current_temperature: 21 }
+};
+const offClimateRow = Rows.project(climateWithoutTarget.entity_id,
+  climateWithoutTarget, {
+    name: "Hallway", icon: "T", isOn: false, pending: false,
+    temperatureUnit: "°C", entityArea: {}, areaNames: {}
+  }, Model);
+eq("off climate without a target keeps an expansion slot",
+   offClimateRow.reserveExpandSlot, true);
+eq("off climate without a target does not expose an empty expander",
+   offClimateRow.expandable, false);
+
 const missing = Rows.project("light.missing", null, {
   name: "light.missing", icon: "?", isOn: false, pending: false,
   temperatureUnit: "", entityArea: {}, areaNames: {}

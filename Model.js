@@ -48,6 +48,7 @@ function isAvailable(entity) {
 
 function isToggleable(entity) {
   return TOGGLEABLE_DOMAINS.indexOf(domain(entity)) !== -1
+    || climateCanToggle(entity)
 }
 
 function isExpandable(entity) {
@@ -56,6 +57,12 @@ function isExpandable(entity) {
 
 function isOn(entity) {
   var state = stateOf(entity)
+  // A climate entity's state is its HVAC mode, so every real mode except
+  // `off` means the device is on. It never reports the literal state `on`.
+  if (domain(entity) === "climate") {
+    return state !== "" && state !== "off"
+      && state !== "unavailable" && state !== "unknown"
+  }
   return state === "on" || state === "locked" || state === "open"
 }
 
@@ -180,6 +187,8 @@ var COVER_STOP = 8
 
 var CLIMATE_TARGET_TEMPERATURE = 1
 var CLIMATE_TARGET_TEMPERATURE_RANGE = 2
+var CLIMATE_TURN_OFF = 128
+var CLIMATE_TURN_ON = 256
 
 function featureBits(entity) {
   var value = attrs(entity).supported_features
@@ -190,6 +199,12 @@ function hasFeature(bits, flag) {
   return (bits & flag) === flag
 }
 
+function climateCanToggle(entity) {
+  if (domain(entity) !== "climate") return false
+  var required = stateOf(entity) === "off" ? CLIMATE_TURN_ON : CLIMATE_TURN_OFF
+  return hasFeature(featureBits(entity), required)
+}
+
 function capabilitiesFor(entity) {
   var dom = domain(entity)
   var a = attrs(entity)
@@ -198,7 +213,7 @@ function capabilitiesFor(entity) {
   var available = !!entity && (activate || !isUnavailable(entity))
   var result = {
     available: available,
-    toggle: available && TOGGLEABLE_DOMAINS.indexOf(dom) !== -1,
+    toggle: available && isToggleable(entity),
     lock: available && dom === "lock",
     activate: available && activate,
     brightness: available && supportsBrightness(entity),
@@ -211,7 +226,8 @@ function capabilitiesFor(entity) {
     coverClose: false,
     climateTarget: false,
     climateRange: false,
-    expandable: false
+    expandable: false,
+    reserveExpandSlot: false
   }
 
   if (available && dom === "media_player") {
@@ -237,6 +253,14 @@ function capabilitiesFor(entity) {
     || result.mediaPrevious || result.mediaPlayPause || result.mediaNext
     || result.mediaVolume || result.coverOpen || result.coverStop
     || result.coverClose || result.climateTarget || result.climateRange
+  // Climate integrations commonly clear the live target while the device is
+  // off. Keep the row geometry stable without pretending there is a target
+  // value to edit: the chevron remains hidden/disabled until controls are
+  // usable, but its slot is already reserved.
+  result.reserveExpandSlot = result.expandable
+    || (!!entity && dom === "climate"
+      && (hasFeature(bits, CLIMATE_TARGET_TEMPERATURE)
+        || hasFeature(bits, CLIMATE_TARGET_TEMPERATURE_RANGE)))
   return result
 }
 
@@ -386,7 +410,7 @@ function iconFor(entity) {
 // its semantics; otherwise homeassistant.toggle.
 function toggleCall(entity, currentlyOn) {
   var dom = domain(entity)
-  if (TOGGLEABLE_DOMAINS.indexOf(dom) !== -1) {
+  if (isToggleable(entity)) {
     return { domain: dom, service: currentlyOn ? "turn_off" : "turn_on" }
   }
   return { domain: "homeassistant", service: "toggle" }
@@ -395,7 +419,7 @@ function toggleCall(entity, currentlyOn) {
 // "toggle" | "lock" (switch calling lock/unlock) | "activate" (one-shot) | "none".
 function controlKind(entity) {
   var dom = domain(entity)
-  if (TOGGLEABLE_DOMAINS.indexOf(dom) !== -1) return "toggle"
+  if (isToggleable(entity)) return "toggle"
   if (dom === "lock") return "lock"
   if (dom === "scene" || dom === "script") return "activate"
   return "none"

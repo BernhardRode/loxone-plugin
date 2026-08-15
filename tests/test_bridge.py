@@ -637,6 +637,23 @@ def test_demo_needs_no_server():
         states = bridge.wait_for(lambda e: e["ev"] == "states")
         check("serves the demo house", states is not None and len(states["entities"]) == 14)
 
+        climate_id = "climate.living_room_thermostat"
+        bridge.send({"op": "call_service", "domain": "climate", "service": "turn_off",
+                     "entity_id": climate_id, "tag": "demo-climate-off"})
+        climate_off = bridge.wait_for(
+            lambda e: e["ev"] == "state_changed"
+            and e["entity"]["entity_id"] == climate_id
+            and e["entity"]["state"] == "off")
+        check("turns off demo climate", climate_off is not None, climate_off)
+
+        bridge.send({"op": "call_service", "domain": "climate", "service": "turn_on",
+                     "entity_id": climate_id, "tag": "demo-climate-on"})
+        climate_on = bridge.wait_for(
+            lambda e: e["ev"] == "state_changed"
+            and e["entity"]["entity_id"] == climate_id
+            and e["entity"]["state"] == "heat")
+        check("turns on demo climate", climate_on is not None, climate_on)
+
         bridge.send({"op": "call_service", "domain": "cover", "service": "open_cover",
                      "entity_id": "cover.garage_door", "tag": "demo-1"})
         changed = bridge.wait_for(
