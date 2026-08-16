@@ -102,6 +102,11 @@ QtObject {
     root.applyConfig(text)
   }
 
+  function setGroupByArea(enabled) {
+    if (root.groupByArea === enabled) return
+    root.saveConfig({ groupByArea: enabled })
+  }
+
   // FileView will not create a missing parent directory, and starting the
   // process is asynchronous — doing it inside saveConfig races the write it is
   // supposed to enable, which on a fresh install loses the first save silently
