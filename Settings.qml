@@ -65,7 +65,8 @@ Item {
     root.resetDrafts()
     try {
       var payload = payloadJson ? JSON.parse(payloadJson) : {}
-      if (payload.tab === "entities" || payload.tab === "connection") {
+      if (payload.tab === "entities" || payload.tab === "connection"
+          || payload.tab === "general") {
         root.tab = payload.tab
       }
     } catch (e) {
@@ -183,6 +184,7 @@ Item {
             fontFamily: root.family
             fontSize: Style.font.caption
             options: [{ value: "connection", label: "Connection" },
+                      { value: "general", label: "General" },
                       { value: "entities", label: "Devices" }]
             value: root.tab
             onChanged: function(value) { root.tab = value }
@@ -208,6 +210,13 @@ Item {
             active: root.tab === "connection"
             visible: active
             sourceComponent: connectionTab
+          }
+
+          Loader {
+            anchors.fill: parent
+            active: root.tab === "general"
+            visible: active
+            sourceComponent: generalTab
           }
 
           Loader {
@@ -417,6 +426,31 @@ Item {
             font.family: root.family
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
+          }
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------------ general
+
+  Component {
+    id: generalTab
+
+    Item {
+      Column {
+        anchors { top: parent.top; left: parent.left; right: parent.right }
+        spacing: Style.spacing.xl
+
+        Toggle {
+          width: parent.width
+          label: "Group by area"
+          description: "Add area tabs for picked devices, alongside Favorites."
+          checked: root.service ? root.service.groupByArea : false
+          foreground: root.foreground
+          fontFamily: root.family
+          onClicked: if (root.service) {
+            root.service.setGroupByArea(!root.service.groupByArea)
           }
         }
       }
