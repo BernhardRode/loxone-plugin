@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "loxone",
   "name": "Loxone",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Bernhard Rode",
   "license": "MIT",
   "description": "View and control Loxone Miniserver devices from the Omarchy bar.",
