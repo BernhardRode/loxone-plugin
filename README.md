@@ -153,6 +153,32 @@ written to `config.json` in the checkout. That file is ignored because it can
 contain a private Miniserver URL, room names, and display-name overrides. The
 password is never stored there.
 
+## Releases
+
+Versions and the [changelog](CHANGELOG.md) are managed by
+[release-please](https://github.com/googleapis/release-please): merging a
+pull request with a [Conventional Commits](https://www.conventionalcommits.org/)
+message (`feat:`, `fix:`, ...) into `main` keeps an up-to-date release PR that
+bumps `manifest.json`'s `version` and the changelog; merging that PR cuts the
+GitHub release. There's nothing to build or publish beyond the git repo
+itself — `omarchy plugin add`/`update` just clones and pulls it.
+
+## Credits
+
+- [`konradk/hass`](https://github.com/konradk/hass) — the Home Assistant
+  panel this plugin was converted from. The QML UI, keyboard handling, and
+  overall panel/settings workflow are still substantially that project's.
+- [Omarchy](https://github.com/basecamp/omarchy) — the Linux desktop this
+  plugin's bar widget, overlay, and IPC surface plug into.
+- [Quickshell](https://github.com/quickshell-mirror/quickshell) — the QtQuick
+  desktop shell toolkit `omarchy-shell` and this plugin are built on.
+- [`discostu105/lox`](https://github.com/discostu105/lox) — a reference
+  Loxone Miniserver CLI whose HTTP endpoints, command verbs, and mood-based
+  light "off" behavior `bin/loxone-bridge` follows.
+- Loxone Electronics GmbH's public Miniserver HTTP/WebSocket API and
+  `LoxApp3.json` structure format, which the bridge talks to. This project
+  is not affiliated with or endorsed by Loxone.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
