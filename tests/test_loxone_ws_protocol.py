@@ -334,17 +334,21 @@ def test_live_push_invalidates_pubkey_cache_on_keyexchange_failure():
         print("  skip (openssl not available)")
         return
     state_uuid = "15c2a003-024c-770c-ffff7239db7fa8de"
-    # Use a server that rejects keyexchange to simulate key mismatch
-    server = FakeLoxoneWs(expected_user="admin", expected_password="secret",
-                         force_keyexchange_reject=True)
+    server = FakeLoxoneWs(expected_user="admin", expected_password="secret")
+    # A second, independent keypair whose public half does not match the
+    # server's real private key, so encrypting with it and sending the
+    # ciphertext to the server is genuinely undecryptable there.
+    wrong_keypair = _make_keypair()
     try:
         out_queue = queue.Queue()
         cfg = {"host": server.host, "port": server.port, "use_tls": False,
                "username": "admin", "password": "secret", "verify_tls": False}
         thread = bridge.LivePushThread(1, out_queue, cfg, {state_uuid: "light.x"})
-        # Pre-seed cache with any valid pubkey (the server will reject keyexchange
-        # anyway due to force_keyexchange_reject flag, triggering cache invalidation)
-        thread._pubkey_cache = bridge.parse_rsa_public_key_pem(server.keypair.pub_pem)
+        # Pre-seed cache with a mismatched pubkey: the server's own keypair
+        # will fail to decrypt what LivePushThread encrypts with this key,
+        # hitting the real production keyexchange-failure path (500) rather
+        # than a synthetic server flag.
+        thread._pubkey_cache = bridge.parse_rsa_public_key_pem(wrong_keypair.pub_pem)
         thread.start()
         try:
             # Give it time to attempt connection and fail at keyexchange
@@ -355,6 +359,7 @@ def test_live_push_invalidates_pubkey_cache_on_keyexchange_failure():
         check("cache was cleared after keyexchange failed",
               thread._pubkey_cache is None, thread._pubkey_cache)
     finally:
+        wrong_keypair.close()
         server.stop()
 
 

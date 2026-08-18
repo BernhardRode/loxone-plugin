@@ -42,9 +42,16 @@ class _Keypair:
         self.pub_pem = open(self.pub_path).read()
 
     def decrypt(self, ciphertext):
+        # rsa_pkcs1_implicit_rejection is a Bleichenbacher-attack countermeasure
+        # that OpenSSL enables by default: instead of erroring on invalid PKCS#1
+        # padding (e.g. ciphertext encrypted for a different key), it silently
+        # returns deterministic garbage with exit code 0. Tests that rely on
+        # decrypt() failing loudly for a genuinely mismatched key need that
+        # countermeasure off.
         result = subprocess.run(
             [OPENSSL, "pkeyutl", "-decrypt", "-inkey", self.priv_path,
-             "-pkeyopt", "rsa_padding_mode:pkcs1"],
+             "-pkeyopt", "rsa_padding_mode:pkcs1",
+             "-pkeyopt", "rsa_pkcs1_implicit_rejection:0"],
             input=ciphertext, capture_output=True, check=True)
         return result.stdout
 
@@ -124,7 +131,7 @@ class FakeLoxoneWs:
     LivePushThread. `expected_user`/`expected_password` gate the HMAC check —
     a wrong password makes gettoken fail, same as a real Miniserver."""
 
-    def __init__(self, expected_user="admin", expected_password="secret", force_keyexchange_reject=False):
+    def __init__(self, expected_user="admin", expected_password="secret"):
         if not openssl_available():
             raise RuntimeError("openssl not available")
         self.keypair = _Keypair()
@@ -137,7 +144,6 @@ class FakeLoxoneWs:
         self._counter_lock = threading.Lock()
         self.pubkey_requests = 0
         self.ws_handshakes = 0
-        self.force_keyexchange_reject = force_keyexchange_reject
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._srv.bind(("127.0.0.1", 0))
@@ -236,9 +242,6 @@ class FakeLoxoneWs:
             command = payload.decode("utf-8", "replace")
 
             if command.startswith("jdev/sys/keyexchange/"):
-                if self.force_keyexchange_reject:
-                    send_json(500, None)
-                    continue
                 b64 = command[len("jdev/sys/keyexchange/"):]
                 ciphertext = base64.b64decode(b64)
                 try:
