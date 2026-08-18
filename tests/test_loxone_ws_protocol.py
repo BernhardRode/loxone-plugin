@@ -294,6 +294,70 @@ def test_live_push_wrong_password_is_unavailable_not_a_crash():
         server.stop()
 
 
+def test_live_push_reuses_cached_pubkey_across_reconnects():
+    section("LivePushThread: refetches the pubkey once, not on every retry")
+    if not openssl_available():
+        print("  skip (openssl not available)")
+        return
+    state_uuid = "15c2a003-024c-770c-ffff7239db7fa8de"
+    server = FakeLoxoneWs(expected_user="admin", expected_password="secret")
+    # Force every attempt to fail authentication (wrong password) so the
+    # thread reconnects repeatedly within the test's time budget — the
+    # public key fetch happens before that failure, so this isolates
+    # whether the *fetch* is being repeated, independent of whether the
+    # overall handshake ever succeeds.
+    orig_start, orig_max = bridge.LIVE_PUSH_BACKOFF_START, bridge.LIVE_PUSH_BACKOFF_MAX
+    bridge.LIVE_PUSH_BACKOFF_START, bridge.LIVE_PUSH_BACKOFF_MAX = 0.05, 0.2
+    try:
+        out_queue = queue.Queue()
+        cfg = {"host": server.host, "port": server.port, "use_tls": False,
+               "username": "admin", "password": "wrong", "verify_tls": False}
+        thread = bridge.LivePushThread(1, out_queue, cfg, {state_uuid: "light.x"})
+        thread.start()
+        try:
+            time.sleep(1.0)  # several reconnect attempts at this backoff
+        finally:
+            thread.stop_event.set()
+            thread.join(timeout=2.0)
+        check("reconnected more than once",
+              server.ws_handshakes >= 2, server.ws_handshakes)
+        check("fetched the public key only once",
+              server.pubkey_requests == 1, server.pubkey_requests)
+    finally:
+        bridge.LIVE_PUSH_BACKOFF_START, bridge.LIVE_PUSH_BACKOFF_MAX = orig_start, orig_max
+        server.stop()
+
+
+def test_live_push_invalidates_pubkey_cache_on_keyexchange_failure():
+    section("LivePushThread: clears pubkey cache when keyexchange fails")
+    if not openssl_available():
+        print("  skip (openssl not available)")
+        return
+    state_uuid = "15c2a003-024c-770c-ffff7239db7fa8de"
+    # Use a server that rejects keyexchange to simulate key mismatch
+    server = FakeLoxoneWs(expected_user="admin", expected_password="secret",
+                         force_keyexchange_reject=True)
+    try:
+        out_queue = queue.Queue()
+        cfg = {"host": server.host, "port": server.port, "use_tls": False,
+               "username": "admin", "password": "secret", "verify_tls": False}
+        thread = bridge.LivePushThread(1, out_queue, cfg, {state_uuid: "light.x"})
+        # Pre-seed cache with any valid pubkey (the server will reject keyexchange
+        # anyway due to force_keyexchange_reject flag, triggering cache invalidation)
+        thread._pubkey_cache = bridge.parse_rsa_public_key_pem(server.keypair.pub_pem)
+        thread.start()
+        try:
+            # Give it time to attempt connection and fail at keyexchange
+            time.sleep(0.5)
+        finally:
+            thread.stop_event.set()
+            thread.join(timeout=2.0)
+        check("cache was cleared after keyexchange failed",
+              thread._pubkey_cache is None, thread._pubkey_cache)
+    finally:
+        server.stop()
+
+
 def main():
     test_rsa_round_trip()
     test_rsa_rejects_malformed_der()
@@ -304,6 +368,8 @@ def main():
     test_live_push_backoff_growth()
     test_live_push_end_to_end()
     test_live_push_wrong_password_is_unavailable_not_a_crash()
+    test_live_push_reuses_cached_pubkey_across_reconnects()
+    test_live_push_invalidates_pubkey_cache_on_keyexchange_failure()
 
     print()
     if FAILURES:

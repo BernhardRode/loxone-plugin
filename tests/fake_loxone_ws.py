@@ -124,7 +124,7 @@ class FakeLoxoneWs:
     LivePushThread. `expected_user`/`expected_password` gate the HMAC check —
     a wrong password makes gettoken fail, same as a real Miniserver."""
 
-    def __init__(self, expected_user="admin", expected_password="secret"):
+    def __init__(self, expected_user="admin", expected_password="secret", force_keyexchange_reject=False):
         if not openssl_available():
             raise RuntimeError("openssl not available")
         self.keypair = _Keypair()
@@ -134,6 +134,10 @@ class FakeLoxoneWs:
         self.key2_salt = "deadbeef"
         self._pushes = []  # [(state_uuid_str, text)], sent after subscribe
         self._push_lock = threading.Lock()
+        self._counter_lock = threading.Lock()
+        self.pubkey_requests = 0
+        self.ws_handshakes = 0
+        self.force_keyexchange_reject = force_keyexchange_reject
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._srv.bind(("127.0.0.1", 0))
@@ -178,6 +182,8 @@ class FakeLoxoneWs:
             path = request_line.split(b" ")[1].decode()
 
             if path.startswith("/jdev/sys/getPublicKey"):
+                with self._counter_lock:
+                    self.pubkey_requests += 1
                 pem_oneline = self.keypair.pub_pem.replace(
                     "-----BEGIN PUBLIC KEY-----", "-----BEGIN CERTIFICATE-----"
                 ).replace("-----END PUBLIC KEY-----", "-----END CERTIFICATE-----")
@@ -203,6 +209,8 @@ class FakeLoxoneWs:
                 pass
 
     def _serve_ws(self, conn, head, buf):
+        with self._counter_lock:
+            self.ws_handshakes += 1
         client_key = None
         for line in head.split(b"\r\n")[1:]:
             if line.lower().startswith(b"sec-websocket-key:"):
@@ -228,6 +236,9 @@ class FakeLoxoneWs:
             command = payload.decode("utf-8", "replace")
 
             if command.startswith("jdev/sys/keyexchange/"):
+                if self.force_keyexchange_reject:
+                    send_json(500, None)
+                    continue
                 b64 = command[len("jdev/sys/keyexchange/"):]
                 ciphertext = base64.b64decode(b64)
                 try:
