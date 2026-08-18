@@ -1520,7 +1520,8 @@ def parse_text_states(data):
     return out
 
 
-LIVE_PUSH_RECONNECT_DELAY = 5.0
+LIVE_PUSH_BACKOFF_START = 5.0
+LIVE_PUSH_BACKOFF_MAX = 60.0
 
 
 class LivePushThread(threading.Thread):
@@ -1551,9 +1552,14 @@ class LivePushThread(threading.Thread):
         self.stop_event = threading.Event()
         self.commands = queue.Queue()  # (uuid, verb, tag)
         self._announced_unavailable = False
+        self._backoff = LIVE_PUSH_BACKOFF_START
 
     def send_command(self, uuid, verb, tag):
         self.commands.put((uuid, verb, tag))
+
+    @staticmethod
+    def _next_backoff(current):
+        return min(current * 2.0, LIVE_PUSH_BACKOFF_MAX)
 
     def run(self):
         if not self.watch:
@@ -1565,7 +1571,9 @@ class LivePushThread(threading.Thread):
                 if not self._announced_unavailable:
                     self._announced_unavailable = True
                     self.out_queue.put(("light_push_unavailable", self.epoch, str(exc)))
-            if self.stop_event.wait(LIVE_PUSH_RECONNECT_DELAY):
+            delay = self._backoff * random.uniform(0.8, 1.2)
+            self._backoff = self._next_backoff(self._backoff)
+            if self.stop_event.wait(delay):
                 break
 
     def _connect_and_listen(self):
@@ -1581,8 +1589,12 @@ class LivePushThread(threading.Thread):
                             cfg["username"], cfg["password"], cfg["verify_tls"], deadline)
             # A successful handshake is itself worth reporting: it clears
             # any earlier "unavailable" the panel may be showing, and is what
-            # lets Bridge.dispatch_command start routing commands here.
+            # lets Bridge.dispatch_command start routing commands here. It
+            # also means whatever caused past failures is over, so the next
+            # failure (if any) should start backing off from scratch again,
+            # not pick up where a much older failure streak left off.
             self._announced_unavailable = False
+            self._backoff = LIVE_PUSH_BACKOFF_START
             self.out_queue.put(("light_push_available", self.epoch))
 
             ws.send_text("jdev/sps/enablebinstatusupdate")
