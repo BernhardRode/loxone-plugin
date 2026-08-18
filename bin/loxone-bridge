@@ -129,6 +129,11 @@ class LoxoneError(Exception):
     """Stable transport error exposed to the bridge lifecycle."""
 
 
+class PubKeyRejectedError(LoxoneError):
+    """Raised when the WS handshake's keyexchange step itself is rejected —
+    signals the cached public key may be stale/wrong, not just bad credentials."""
+
+
 # --------------------------------------------------------------------------
 # URL handling
 # --------------------------------------------------------------------------
@@ -1421,7 +1426,7 @@ def _fetch_rsa_public_key(host, port, use_tls, username, password, verify_tls):
     return parse_rsa_public_key_pem(pem)
 
 
-def _ws_expect_code_200(ws, label, deadline):
+def _ws_expect_code_200(ws, label, deadline, error_cls=LoxoneError):
     for _ in range(10):
         opcode, payload = ws.recv(deadline)
         if opcode != 0x1:
@@ -1435,24 +1440,28 @@ def _ws_expect_code_200(ws, label, deadline):
         if code == "200":
             return ll.get("value")
         if code != "0":
-            raise LoxoneError("%s failed (code %s)" % (label, code))
-    raise LoxoneError("%s: no response from the Miniserver" % label)
+            raise error_cls("%s failed (code %s)" % (label, code))
+    raise error_cls("%s: no response from the Miniserver" % label)
 
 
-def ws_authenticate(ws, host, port, use_tls, username, password, verify_tls, deadline):
+def ws_authenticate(ws, pubkey, username, password, deadline):
     """RSA keyexchange, then an HMAC-signed token request — all three
     commands sent over the already-open (and already TLS-encrypted, when
     `use_tls`) WebSocket `ws`. Raises LoxoneError on any failure; the token
     itself is not returned because nothing here needs to reuse it — the
     live-push connection re-authenticates itself each time it (re)connects,
-    the same as the reference CLI's own streaming command does."""
-    pubkey = _fetch_rsa_public_key(host, port, use_tls, username, password, verify_tls)
+    the same as the reference CLI's own streaming command does.
+
+    `pubkey` is fetched by the caller, not here — LivePushThread caches it
+    across reconnect attempts within one epoch (see `_connect_and_listen`)
+    since it never needs to change between attempts against the same
+    Miniserver."""
     aes_key = os.urandom(32)
     aes_iv = os.urandom(16)
     key_info = ("%s:%s" % (aes_key.hex(), aes_iv.hex())).encode("ascii")
     encrypted = base64.b64encode(rsa_pkcs1v15_encrypt(pubkey, key_info)).decode("ascii")
     ws.send_text("jdev/sys/keyexchange/%s" % encrypted)
-    _ws_expect_code_200(ws, "keyexchange", deadline)
+    _ws_expect_code_200(ws, "keyexchange", deadline, error_cls=PubKeyRejectedError)
 
     ws.send_text("jdev/sys/getkey2/%s" % username)
     key2 = _ws_expect_code_200(ws, "getkey2", deadline)
@@ -1553,6 +1562,7 @@ class LivePushThread(threading.Thread):
         self.commands = queue.Queue()  # (uuid, verb, tag)
         self._announced_unavailable = False
         self._backoff = LIVE_PUSH_BACKOFF_START
+        self._pubkey_cache = None
 
     def send_command(self, uuid, verb, tag):
         self.commands.put((uuid, verb, tag))
@@ -1585,8 +1595,19 @@ class LivePushThread(threading.Thread):
             headers={"Authorization": "Basic " + auth})
         try:
             deadline = time.monotonic() + WS_HANDSHAKE_TIMEOUT
-            ws_authenticate(ws, cfg["host"], cfg["port"], cfg["use_tls"],
-                            cfg["username"], cfg["password"], cfg["verify_tls"], deadline)
+            if self._pubkey_cache is None:
+                self._pubkey_cache = _fetch_rsa_public_key(
+                    cfg["host"], cfg["port"], cfg["use_tls"],
+                    cfg["username"], cfg["password"], cfg["verify_tls"])
+            try:
+                ws_authenticate(ws, self._pubkey_cache, cfg["username"],
+                                cfg["password"], deadline)
+            except PubKeyRejectedError:
+                # The cached key is stale or wrong — drop it so the next
+                # reconnect attempt fetches a fresh one instead of wedging on a
+                # bad cached key forever.
+                self._pubkey_cache = None
+                raise
             # A successful handshake is itself worth reporting: it clears
             # any earlier "unavailable" the panel may be showing, and is what
             # lets Bridge.dispatch_command start routing commands here. It
