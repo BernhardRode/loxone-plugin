@@ -204,6 +204,21 @@ def test_mood_state_interpretation():
           bridge.LivePushThread._mood_state("not json") is None)
 
 
+def test_live_push_backoff_growth():
+    section("LivePushThread._next_backoff: doubles and caps, starts small")
+    check("starts at LIVE_PUSH_BACKOFF_START",
+          bridge.LIVE_PUSH_BACKOFF_START == 5.0)
+    check("doubles once",
+          bridge.LivePushThread._next_backoff(5.0) == 10.0)
+    check("doubles again",
+          bridge.LivePushThread._next_backoff(10.0) == 20.0)
+    check("caps at LIVE_PUSH_BACKOFF_MAX",
+          bridge.LivePushThread._next_backoff(50.0) == bridge.LIVE_PUSH_BACKOFF_MAX)
+    check("never exceeds the cap once already at it",
+          bridge.LivePushThread._next_backoff(bridge.LIVE_PUSH_BACKOFF_MAX)
+          == bridge.LIVE_PUSH_BACKOFF_MAX)
+
+
 # ---------------------------------------------------------------- end to end
 
 
@@ -222,6 +237,7 @@ def test_live_push_end_to_end():
         cfg = {"host": server.host, "port": server.port, "use_tls": False,
                "username": "admin", "password": "secret", "verify_tls": False}
         thread = bridge.LivePushThread(1, out_queue, cfg, {state_uuid: entity_id})
+        thread._backoff = 999.0  # prove a real reset happens, not a no-op
         thread.start()
         try:
             kinds = []
@@ -236,6 +252,8 @@ def test_live_push_end_to_end():
                     break
             check("connects and authenticates",
                   any(k[0] == "light_push_available" for k in kinds), kinds)
+            check("resets backoff after a successful handshake",
+                  thread._backoff == bridge.LIVE_PUSH_BACKOFF_START, thread._backoff)
             push = next((k for k in kinds if k[0] == "light_push"), None)
             check("receives the queued push", push is not None, kinds)
             check("resolves to the right entity", push and push[2] == entity_id, push)
@@ -283,6 +301,7 @@ def main():
     test_binary_header_parsing()
     test_text_state_parsing()
     test_mood_state_interpretation()
+    test_live_push_backoff_growth()
     test_live_push_end_to_end()
     test_live_push_wrong_password_is_unavailable_not_a_crash()
 
