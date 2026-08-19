@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.1](https://github.com/BernhardRode/loxone-plugin/compare/loxone-v0.2.0...loxone-v0.2.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **bridge:** backoff + pubkey caching for LivePushThread reconnects ([bbfe41d](https://github.com/BernhardRode/loxone-plugin/commit/bbfe41dbe1003e01b933477c7a320968d00cee05))
+* **bridge:** cache LivePushThread's RSA public key across reconnects ([925683b](https://github.com/BernhardRode/loxone-plugin/commit/925683bee7b8c340af95adab855ea015a08c5366))
+* **bridge:** exponential backoff + jitter on LivePushThread reconnects ([cae9eed](https://github.com/BernhardRode/loxone-plugin/commit/cae9eed02d9e4819be1c53cccece380ebf1b1f71))
+
 ## [0.2.0](https://github.com/BernhardRode/loxone-plugin/compare/loxone-v0.1.0...loxone-v0.2.0) (2026-08-17)
 
 
