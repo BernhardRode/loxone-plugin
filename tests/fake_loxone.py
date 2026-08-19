@@ -14,6 +14,7 @@ import http.server
 import json
 import re
 import threading
+import time
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -45,7 +46,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802 — BaseHTTPRequestHandler's own naming
         server = self.server
-        server.requests.append(self.path)
+        server.record(self.path, id(self.connection))
+        if self.path.startswith("/dev/sps/io/"):
+            uuid = self.path[len("/dev/sps/io/"):].rsplit("/", 1)[0]
+            if uuid in server.drop_uuids:
+                # Hang up without answering, the way a Miniserver too busy to
+                # keep up drops requests. The client sees a broken connection,
+                # not an HTTP error.
+                self.close_connection = True
+                return
+            delay = server.delay_uuids.get(uuid)
+            if delay:
+                time.sleep(delay)
         if not self._authorized():
             self._send(401, '{"error":"unauthorized"}')
             return
@@ -91,14 +103,50 @@ class FakeLoxone(http.server.ThreadingHTTPServer):
         self.states = states if states is not None else default_states()
         self.username = username
         self.password = password
+        # `requests` stays a plain list of paths for tests that only care
+        # what was asked for; `request_log` adds when, and over which
+        # connection, for the tests that care how hard the Miniserver is
+        # being worked.
         self.requests = []
+        self.request_log = []   # (monotonic time, path, connection id)
         self.commands = []
+        # Controls the server refuses to answer at all, and controls it
+        # answers only after a delay — the two shapes an overloaded
+        # Miniserver actually presents.
+        self.drop_uuids = set()
+        self.delay_uuids = {}
+        self._log_lock = threading.Lock()
         self._thread = threading.Thread(target=self.serve_forever, daemon=True)
         self._thread.start()
 
     @property
     def url(self):
         return "http://127.0.0.1:%d" % self.server_address[1]
+
+    def record(self, path, connection_id):
+        with self._log_lock:
+            self.requests.append(path)
+            self.request_log.append((time.monotonic(), path, connection_id))
+
+    def state_reads(self, since=0.0):
+        """The `/dev/sps/io/<uuid>/all` reads logged at or after `since` —
+        the requests whose rate is what actually loads a Miniserver."""
+        with self._log_lock:
+            return [entry for entry in self.request_log
+                    if entry[0] >= since and entry[1].startswith("/dev/sps/io/")]
+
+    def peak_reads_per_second(self, since=0.0):
+        """The most state reads seen in any one-second window."""
+        times = [entry[0] for entry in self.state_reads(since)]
+        peak = 0
+        for index, start in enumerate(times):
+            count = 0
+            for other in times[index:]:
+                if other - start >= 1.0:
+                    break
+                count += 1
+            peak = max(peak, count)
+        return peak
 
     def on_command(self, uuid, cmd):
         """Default command handling: mutate `states` the way a real

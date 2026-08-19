@@ -115,10 +115,42 @@ USER_AGENT = "loxone-omarchy-bridge/1"
 PROTOCOL_VERSION = 1
 
 REQUEST_TIMEOUT = 4.0
+
+# Poll pacing. A Miniserver is a small embedded device, and every control
+# costs it one Basic-authenticated HTTP request per cycle. Polling every
+# control every 2.5s is fine for a handful of them and ruinous for a whole
+# house: a couple hundred controls works out to ~80 requests/second, forever,
+# whether or not anyone is looking at the panel — enough to make a real
+# Miniserver stop answering its own app. Four limits keep the load bounded no
+# matter how large the install is:
+#   POLL_INTERVAL       the fastest cycle we ever ask for, and only while a
+#                       surface is actually showing device state.
+#   POLL_INTERVAL_IDLE  the cycle used while nothing is on screen, which is
+#                       the common case — the popover is closed almost all of
+#                       the time.
+#   POLL_MAX_RPS        a hard ceiling on requests per second across every
+#                       poll worker, so a bigger structure makes each cycle
+#                       take longer instead of making the Miniserver busier.
+#   POLL_DUTY           the share of wall time the bridge may spend polling,
+#                       which keeps the next cycle from starting until the
+#                       Miniserver has had a proportional break. A server
+#                       answering slowly gets asked less often, not more.
 POLL_INTERVAL = 2.5
+POLL_INTERVAL_IDLE = 30.0
+POLL_MAX_RPS = 10.0
+POLL_DUTY = 0.25
 
 BACKOFF_START = 1.0
 BACKOFF_MAX = 30.0
+
+# A failed poll cycle is not by itself a reason to tear the connection down
+# and rebuild it. Reconnecting re-fetches LoxApp3.json — the single heaviest
+# response the Miniserver serves — and then re-polls every control, which is
+# exactly the wrong answer to a server that is already struggling to keep up,
+# and turns "briefly slow" into a load spiral it cannot climb out of.
+# Tolerate this many consecutive cycles in which nothing at all could be read
+# before giving up on the connection.
+POLL_FAILURES_BEFORE_RECONNECT = 3
 
 
 def now():
@@ -537,52 +569,125 @@ def poll_one(client, entry, light_hints=None):
 
 
 # A Miniserver with a couple hundred controls (not unusual for a whole house)
-# polled one control at a time over a single connection is the difference
-# between a ~2-3s cycle and one running well past the interval meant to pace
-# it, which reads as "the panel is out of sync" even though every poll is
-# individually correct — it just hasn't gotten around to a given control yet.
-# Splitting the registry across a handful of connections cuts that almost
-# linearly without needing the bridge to know which controls the panel
-# actually shows right now.
-POLL_WORKERS = 6
+# polled one control at a time over a single connection runs well past the
+# interval meant to pace it, which reads as "the panel is out of sync" even
+# though every poll is individually correct — it just hasn't gotten around to
+# a given control yet. Splitting the registry across a few connections fixes
+# that, but concurrency is not free on the other end: each one is another
+# request the Miniserver is servicing at the same moment. Keep it to a
+# handful and let POLL_MAX_RPS, not the worker count, decide the load.
+POLL_WORKERS = 3
 
 
-def poll_all(cfg, registry, light_hints=None):
-    """Poll every control in `registry`, split across POLL_WORKERS connections.
-    Raises LoxoneError if any of them failed — a partial, silently-incomplete
-    snapshot is worse than a clean retry of the whole thing."""
+class RateLimiter:
+    """A shared ceiling on how often the poll workers may hit the Miniserver.
+
+    Every poll request across every worker passes through one instance, so
+    the request rate becomes a property of the bridge rather than of the
+    install size: a bigger structure makes each cycle take longer instead of
+    making the Miniserver busier. Commands deliberately do *not* go through
+    this — they are user-initiated, rare, and have to stay instant.
+    """
+
+    def __init__(self, rate):
+        self._min_gap = (1.0 / rate) if rate and rate > 0 else 0.0
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
+
+    def acquire(self, stop_event=None):
+        """Block until this request's slot comes up. Returns False if
+        `stop_event` fired while waiting, so a worker being torn down doesn't
+        sit out a wait it no longer needs."""
+        if self._min_gap <= 0.0:
+            return True
+        with self._lock:
+            current = now()
+            slot = max(current, self._next_slot)
+            self._next_slot = slot + self._min_gap
+        delay = slot - current
+        if delay <= 0.0:
+            return True
+        if stop_event is not None:
+            return not stop_event.wait(delay)
+        time.sleep(delay)
+        return True
+
+
+class PollSession:
+    """The connections and pacing one poller reuses for its whole lifetime.
+
+    Rebuilding these per cycle meant a TCP handshake — and, on the
+    self-signed HTTPS a Miniserver normally serves, a full TLS handshake —
+    per worker every POLL_INTERVAL. Handshakes are among the most expensive
+    things a small embedded server does, and they were being paid over and
+    over for connections keep-alive would have kept usable.
+    """
+
+    def __init__(self, cfg, workers=POLL_WORKERS, rate=POLL_MAX_RPS):
+        self.cfg = cfg
+        self.workers = max(1, workers)
+        self.limiter = RateLimiter(rate)
+        self.clients = [LoxoneClient(**cfg) for _ in range(self.workers)]
+
+    def close(self):
+        for client in self.clients:
+            client.close()
+        self.clients = []
+
+
+def poll_all(session, registry, light_hints=None, stop_event=None):
+    """Poll every control in `registry` over the session's connections, paced
+    by its rate limiter.
+
+    Returns `(entities, failed_count)`. A control that could not be read
+    contributes no entity at all rather than a fabricated one, so the panel
+    keeps showing the last state actually read — the same "never publish a
+    made-up state" guarantee the old all-or-nothing behavior gave, without
+    answering a struggling Miniserver by reconnecting and re-reading
+    everything. LoxoneError is raised only when nothing at all could be read,
+    which is a real connection failure rather than a few slow controls.
+    """
     entries = list(registry.values())
     if not entries:
-        return []
-    worker_count = max(1, min(POLL_WORKERS, len(entries)))
+        return [], 0
+    worker_count = max(1, min(session.workers, len(entries)))
     chunks = [entries[i::worker_count] for i in range(worker_count)]
-    results = [None] * worker_count
-    errors = [None] * worker_count
+    results = [[] for _ in range(worker_count)]
+    failures = [0] * worker_count
+    last_error = [None]
 
-    def run_chunk(index, chunk):
-        client = LoxoneClient(**cfg)
-        try:
-            results[index] = [poll_one(client, entry, light_hints) for entry in chunk]
-        except LoxoneError as exc:
-            errors[index] = exc
-        finally:
-            client.close()
+    def run_chunk(index, chunk, client):
+        for entry in chunk:
+            if stop_event is not None and stop_event.is_set():
+                return
+            if not session.limiter.acquire(stop_event):
+                return
+            try:
+                results[index].append(poll_one(client, entry, light_hints))
+            except LoxoneError as exc:
+                failures[index] += 1
+                last_error[0] = exc
+            except Exception as exc:  # noqa: BLE001
+                failures[index] += 1
+                last_error[0] = LoxoneError(str(exc))
 
-    threads = [threading.Thread(target=run_chunk, args=(i, chunk), daemon=True)
-               for i, chunk in enumerate(chunks)]
+    threads = [threading.Thread(target=run_chunk,
+                                args=(i, chunks[i], session.clients[i]),
+                                daemon=True)
+               for i in range(worker_count)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    for error in errors:
-        if error is not None:
-            raise error
-
     entities = []
     for chunk_result in results:
         entities.extend(chunk_result)
-    return entities
+    failed = sum(failures)
+    if not entities and failed:
+        raise last_error[0] or LoxoneError(
+            "the Miniserver did not answer any control")
+    return entities, failed
 
 
 def fetch_structure(client):
@@ -812,22 +917,57 @@ class DemoHouse:
 # --------------------------------------------------------------------------
 
 
+class PollPacing:
+    """Shared, thread-safe knobs the main loop uses to steer a running poller:
+    whether any surface is showing device state right now, and a one-shot
+    nudge to poll immediately rather than finish the current wait.
+
+    Owned by the Bridge and reused across reconnects — which surfaces are
+    open has nothing to do with which connection generation is current, the
+    same way the camera's viewer count is independent of the Miniserver.
+    """
+
+    def __init__(self, active=False):
+        self.active = threading.Event()
+        if active:
+            self.active.set()
+        self.wake = threading.Event()
+
+    def set_active(self, value):
+        was_active = self.active.is_set()
+        if value:
+            self.active.set()
+            if not was_active:
+                # A panel that just opened should not have to sit through the
+                # rest of an idle interval to show current state.
+                self.wake.set()
+        else:
+            self.active.clear()
+
+
 class PollerThread(threading.Thread):
     """Owns one Miniserver (or demo house) connection: fetches the structure
-    once, then polls every control on an interval. Every message it posts
-    carries the epoch it was started with, so the main loop can silently drop
-    anything left over from a connection it has already replaced."""
+    once, then polls every control on a self-pacing interval. Every message
+    it posts carries the epoch it was started with, so the main loop can
+    silently drop anything left over from a connection it has already
+    replaced."""
 
-    def __init__(self, epoch, out_queue, cfg=None, demo_house=None, light_hints=None):
+    def __init__(self, epoch, out_queue, cfg=None, demo_house=None,
+                 light_hints=None, cached=None, pacing=None):
         super().__init__(daemon=True)
         self.epoch = epoch
         self.out_queue = out_queue
         self.cfg = cfg
         self.demo_house = demo_house
         self.light_hints = light_hints
+        # (registry, rooms, light_watch) from a previous connection to this
+        # same Miniserver, when there is one — see run().
+        self.cached = cached
+        self.pacing = pacing if pacing is not None else PollPacing()
         self.stop_event = threading.Event()
 
     def run(self):
+        session = None
         light_watch = {}
         try:
             if self.demo_house is not None:
@@ -835,43 +975,121 @@ class PollerThread(threading.Thread):
                 rooms = self.demo_house.rooms
                 entities = self.demo_house.snapshot()
             else:
-                structure_client = LoxoneClient(**self.cfg)
-                try:
-                    structure = fetch_structure(structure_client)
-                finally:
-                    structure_client.close()
-                registry, rooms = build_registry(structure)
-                if not registry:
-                    raise LoxoneError(
-                        "the Miniserver structure has no recognizable controls")
-                light_watch = build_light_controller_watch(structure)
-                entities = poll_all(self.cfg, registry, self.light_hints)
+                session = PollSession(self.cfg)
+                if self.cached is not None:
+                    # Reconnecting to the same Miniserver after a poll
+                    # failure. The structure has not changed, and re-fetching
+                    # LoxApp3.json is the heaviest thing we could ask of a
+                    # server that just stopped keeping up — the main loop
+                    # drops this cache if the attempt fails anyway, so a
+                    # structure that really did change still gets re-read.
+                    registry, rooms, light_watch = self.cached
+                else:
+                    structure_client = LoxoneClient(**self.cfg)
+                    try:
+                        structure = fetch_structure(structure_client)
+                    finally:
+                        structure_client.close()
+                    registry, rooms = build_registry(structure)
+                    if not registry:
+                        raise LoxoneError(
+                            "the Miniserver structure has no recognizable controls")
+                    light_watch = build_light_controller_watch(structure)
+                entities, _ = poll_all(session, registry, self.light_hints,
+                                       self.stop_event)
         except LoxoneError as exc:
+            if session is not None:
+                session.close()
             self.out_queue.put(("connect_error", self.epoch, str(exc)))
             return
         except Exception as exc:  # noqa: BLE001 — surfaced, not swallowed
+            if session is not None:
+                session.close()
             self.out_queue.put(("connect_error", self.epoch, str(exc)))
             return
 
         self.out_queue.put(
             ("connected", self.epoch, registry, rooms, entities, light_watch))
+        try:
+            self.poll_loop(session, registry)
+        finally:
+            if session is not None:
+                session.close()
 
-        while not self.stop_event.wait(POLL_INTERVAL):
+    def poll_loop(self, session, registry):
+        consecutive_failures = 0
+        degraded = False
+        delay = self.next_delay(0.0)
+        while self.sleep(delay):
+            started = now()
             try:
                 if self.demo_house is not None:
                     self.demo_house.tick()
                     entities = self.demo_house.snapshot()
+                    failed = 0
                 else:
-                    entities = poll_all(self.cfg, registry, self.light_hints)
+                    entities, failed = poll_all(session, registry,
+                                                self.light_hints, self.stop_event)
             except LoxoneError as exc:
-                self.out_queue.put(("poll_error", self.epoch, str(exc)))
-                break
+                consecutive_failures += 1
+                if consecutive_failures >= POLL_FAILURES_BEFORE_RECONNECT:
+                    self.out_queue.put(("poll_error", self.epoch, str(exc)))
+                    return
+                # Back off rather than reconnect: a Miniserver that just
+                # stopped answering needs less traffic, and a full reconnect
+                # would immediately send it far more.
+                delay = self.next_delay(now() - started,
+                                        penalty=consecutive_failures)
+                continue
             except Exception as exc:  # noqa: BLE001
                 self.out_queue.put(("poll_error", self.epoch, str(exc)))
-                break
+                return
             if self.stop_event.is_set():
-                break
+                return
+            consecutive_failures = 0
+            # Controls that could not be read keep their last known state
+            # rather than reconnecting the whole thing — but a Miniserver
+            # that goes on half-answering should not do so silently, so
+            # report the transition (not every cycle).
+            if bool(failed) != degraded:
+                degraded = bool(failed)
+                self.out_queue.put(("poll_degraded", self.epoch, failed,
+                                    len(entities) + failed))
             self.out_queue.put(("poll_result", self.epoch, entities))
+            delay = self.next_delay(now() - started)
+
+    def next_delay(self, elapsed, penalty=0):
+        """How long to wait before starting the next cycle.
+
+        Three things stretch it past the nominal interval: nobody having a
+        surface open, the last cycle having been slow, and recent failures.
+        The middle one is the important one — capping the share of the
+        Miniserver's time this bridge takes means an install big enough (or a
+        server loaded enough) that a cycle runs long gets polled less often,
+        instead of being asked for the next round the moment it finishes the
+        last.
+        """
+        base = POLL_INTERVAL if self.pacing.active.is_set() else POLL_INTERVAL_IDLE
+        paced = elapsed * (1.0 - POLL_DUTY) / POLL_DUTY if elapsed > 0 else 0.0
+        delay = max(base, paced)
+        if penalty:
+            delay = max(delay, min(base * (2 ** penalty), BACKOFF_MAX))
+        return delay
+
+    def sleep(self, delay):
+        """Wait out `delay`. Returns False if the poller should stop, True if
+        it should run another cycle — either because the wait finished or
+        because a surface opened and asked for fresh state now."""
+        end = now() + delay
+        while True:
+            remaining = end - now()
+            if remaining <= 0.0:
+                return True
+            if self.stop_event.wait(min(remaining, 0.25)):
+                return False
+            if self.pacing.wake.is_set():
+                self.pacing.wake.clear()
+                return True
 
 
 class CommandWorker(threading.Thread):
@@ -1521,6 +1739,14 @@ def parse_text_states(data):
 
 
 LIVE_PUSH_RECONNECT_DELAY = 5.0
+# Old firmware simply does not have this handshake, and a Miniserver that is
+# too busy to answer will keep failing it for as long as it stays busy.
+# Retrying every 5s forever means a TCP/TLS connect, a public-key fetch and a
+# WebSocket upgrade every 5s forever — real, permanent load on the exact
+# device that is already struggling, in service of an enhancement that is
+# best-effort by definition. Back off instead, and only reset once a
+# handshake has actually succeeded.
+LIVE_PUSH_RECONNECT_MAX = 300.0
 
 
 class LivePushThread(threading.Thread):
@@ -1551,6 +1777,7 @@ class LivePushThread(threading.Thread):
         self.stop_event = threading.Event()
         self.commands = queue.Queue()  # (uuid, verb, tag)
         self._announced_unavailable = False
+        self._reconnect_delay = LIVE_PUSH_RECONNECT_DELAY
 
     def send_command(self, uuid, verb, tag):
         self.commands.put((uuid, verb, tag))
@@ -1565,7 +1792,10 @@ class LivePushThread(threading.Thread):
                 if not self._announced_unavailable:
                     self._announced_unavailable = True
                     self.out_queue.put(("light_push_unavailable", self.epoch, str(exc)))
-            if self.stop_event.wait(LIVE_PUSH_RECONNECT_DELAY):
+                self._reconnect_delay = min(self._reconnect_delay * 2,
+                                            LIVE_PUSH_RECONNECT_MAX)
+            jittered = self._reconnect_delay * (0.75 + random.random() * 0.5)
+            if self.stop_event.wait(jittered):
                 break
 
     def _connect_and_listen(self):
@@ -1583,6 +1813,7 @@ class LivePushThread(threading.Thread):
             # any earlier "unavailable" the panel may be showing, and is what
             # lets Bridge.dispatch_command start routing commands here.
             self._announced_unavailable = False
+            self._reconnect_delay = LIVE_PUSH_RECONNECT_DELAY
             self.out_queue.put(("light_push_available", self.epoch))
 
             ws.send_text("jdev/sps/enablebinstatusupdate")
@@ -1704,6 +1935,15 @@ class Bridge:
         self.registry = {}
         self.rooms = []
         self.last_states = {}
+        # (registry, rooms, light_watch) for `self.cfg`, kept so a reconnect
+        # after a poll failure does not re-fetch LoxApp3.json from a
+        # Miniserver that is already struggling. Dropped whenever the
+        # Miniserver changes, or whenever an attempt that used it failed.
+        self.structure_cache = None
+        # Whether any surface is showing device state right now. Polling a
+        # Miniserver is not free for the Miniserver, so — exactly like the
+        # camera below — it runs at full speed only while someone is looking.
+        self.pacing = PollPacing()
         # entity_id -> "on"/"off", for LightControllerV2's own reading —
         # see build_entity and CommandWorker._record_hint. Deliberately
         # survives a poller reconnect (still the best information available)
@@ -1837,6 +2077,10 @@ class Bridge:
             self.apply_camera_resume()
         elif op == "camera_pause":
             self.apply_camera_pause()
+        elif op == "poll_active":
+            self.pacing.set_active(True)
+        elif op == "poll_idle":
+            self.pacing.set_active(False)
         else:
             self.log("warn", "unknown op %r" % op)
 
@@ -1850,6 +2094,7 @@ class Bridge:
             self.stop_workers()
             self.generation = next_generation
             self.cfg = None
+            self.structure_cache = None
             self.password = ""
             self.want_connect = True
             self.backoff = BACKOFF_START
@@ -1891,8 +2136,10 @@ class Bridge:
 
         if cfg != self.cfg:
             # A different Miniserver (or none) — UUIDs from the old one are
-            # meaningless here even if one happened to collide.
+            # meaningless here even if one happened to collide, and its
+            # structure certainly is.
             self.light_hints = {}
+            self.structure_cache = None
         self.stop_workers()
         self.generation = next_generation
         self.cfg = cfg
@@ -1914,6 +2161,7 @@ class Bridge:
         self.generation = self._resolve_generation(command)
         self.want_connect = False
         self.cfg = None
+        self.structure_cache = None
         self.password = ""
         self.set_phase("idle", force=True)
 
@@ -1978,6 +2226,7 @@ class Bridge:
 
     def start_poller(self):
         self.set_phase("connecting")
+        self.pacing.wake.clear()
         epoch = self.epoch
         if self.demo:
             self.demo_house = DemoHouse()
@@ -1985,14 +2234,19 @@ class Bridge:
                                        demo_house=self.demo_house)
         else:
             self.poller = PollerThread(epoch, self.worker_queue, cfg=self.cfg,
-                                       light_hints=self.light_hints)
+                                       light_hints=self.light_hints,
+                                       cached=self.structure_cache,
+                                       pacing=self.pacing)
         self.poller.start()
 
     def schedule_retry(self, message, error_kind="connection"):
         self.stop_workers()
         self.set_phase("error" if self.backoff >= BACKOFF_MAX else "connecting",
                        message, error_kind=error_kind)
-        self.next_attempt = now() + self.backoff
+        # Jittered: a Miniserver that fell over under load should not be met
+        # by every retry landing on the same beat as whatever else is
+        # reconnecting to it.
+        self.next_attempt = now() + self.backoff * (0.75 + random.random() * 0.5)
         self.backoff = min(self.backoff * 2, BACKOFF_MAX)
 
     # -- camera lifecycle ----------------------------------------------------
@@ -2110,11 +2364,15 @@ class Bridge:
             return  # a connection we have already replaced
 
         if kind == "connect_error":
+            # Whatever we had is not usable: if the attempt reused a cached
+            # structure, the next one has to go read a fresh one.
+            self.structure_cache = None
             self.schedule_retry(item[2])
         elif kind == "connected":
             _, _, registry, rooms, entities, light_watch = item
             self.registry = registry
             self.rooms = rooms
+            self.structure_cache = (registry, rooms, light_watch)
             self.backoff = BACKOFF_START
             self.emit({"ev": "registries", "rooms": rooms})
             self.apply_snapshot(entities, initial=True)
@@ -2135,6 +2393,14 @@ class Bridge:
             self.apply_snapshot(item[2], initial=False)
         elif kind == "poll_error":
             self.schedule_retry(item[2])
+        elif kind == "poll_degraded":
+            _, _, failed, total = item
+            if failed:
+                self.log("warn",
+                         "%d of %d controls did not answer this poll — keeping "
+                         "their last known state" % (failed, total))
+            else:
+                self.log("info", "all controls are answering again")
         elif kind == "light_push":
             _, _, entity_id, state = item
             self.light_hints[entity_id] = state

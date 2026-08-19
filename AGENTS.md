@@ -41,10 +41,11 @@ to `Service.qml`.
 
 `bin/loxone-bridge` mainly uses the Miniserver's plain HTTP API — a single
 Basic-auth GET per structure fetch, per poll, and per command (`poll_all`,
-`execute_command`), parallelized across `POLL_WORKERS` connections so a
-couple-hundred-control install still cycles close to `POLL_INTERVAL`. This is
-still a deliberate trade — a few seconds of latency instead of instant push —
-for most controls, and it is still true that adding a third-party crypto
+`execute_command`), parallelized across a few reused `PollSession`
+connections and paced against a hard request-rate ceiling (see "Polling is
+not free for the Miniserver" below). This is still a deliberate trade — a few
+seconds of latency instead of instant push — for most controls, and it is
+still true that adding a third-party crypto
 library (`pycryptodome`, `cryptography`, ...) to speak the Miniserver's real
 push protocol is off the table, since it would break the no-pip/no-venv
 install invariant.
@@ -92,20 +93,71 @@ timer. Both MJPEG (`multipart/x-mixed-replace`) and single-image snapshot
 endpoints are supported, detected from the response's Content-Type, so one
 "stream URL" field works for either.
 
+## Design notes: polling is not free for the Miniserver
+
+A Miniserver is a small embedded device, and the panel is not the only thing
+talking to it — the Loxone app, the web interface, and the house's own logic
+all want its attention. Every polled control costs it one Basic-authenticated
+HTTP request per cycle, so the naive shape of "poll everything on a fixed
+short interval" scales the *request rate* with the size of the install: a
+couple hundred controls at a 2.5s interval is ~80 requests/second, sustained
+forever, whether or not anyone is looking at the panel. That is enough to
+make a real Miniserver stop answering its own app, and it is exactly what
+this plugin used to do.
+
+Four limits in `bin/loxone-bridge` keep the load bounded, and a regression in
+any of them brings the problem back:
+
+- **`POLL_MAX_RPS`** is a hard ceiling on state reads per second, shared by
+  every poll worker through one `RateLimiter`. This is what makes a bigger
+  structure cost a *longer cycle* rather than a busier Miniserver. Commands
+  deliberately bypass the limiter — they are user-initiated, rare, and must
+  stay instant.
+- **`POLL_DUTY`** caps the share of wall time spent polling: the next cycle
+  waits in proportion to how long the last one took. A Miniserver answering
+  slowly therefore gets asked *less* often, never more.
+- **`POLL_INTERVAL_IDLE`** is the cadence used while no surface is showing
+  device state, which is nearly all the time. Panel and Settings register as
+  state viewers (`registerStateViewer`, the same viewer-count shape the
+  camera already used); `poll_active` also cuts the current wait short, so
+  opening the popover refreshes immediately instead of showing stale rows.
+- **`PollSession`** holds its connections open for the poller's lifetime.
+  Rebuilding them per cycle meant a TCP — and, on the self-signed HTTPS a
+  Miniserver normally serves, a full TLS — handshake per worker every
+  interval, which is among the most expensive things a small embedded server
+  does.
+
+The failure handling matters as much as the steady state, because the
+original design's response to overload was to generate more of it. A poll
+cycle that fails must not tear the connection down: reconnecting re-fetches
+`LoxApp3.json` (the heaviest response the Miniserver serves) and then re-polls
+every control, so "the Miniserver got slow" turned directly into "hit it with
+everything at once," repeatedly. Hence `poll_all` returning `(entities,
+failed_count)` and tolerating partial failures — a control that could not be
+read contributes no entity rather than a fabricated one, which keeps the
+original "never publish a made-up state" guarantee without the amplification
+— `POLL_FAILURES_BEFORE_RECONNECT` before giving up on a connection at all,
+`Bridge.structure_cache` so a reconnect that does happen skips the structure
+fetch, and jittered backoff on both `schedule_retry` and `LivePushThread`
+(whose fixed 5s retry was its own permanent load on firmware that cannot do
+the handshake at all).
+
 ## Keeping the panel in sync with the Miniserver
 
 State reaching the panel late or wrong reads as "the button doesn't work,"
 even when the command itself succeeded — three separate things guard against
 that, and a regression in any one of them will look like the others:
 
-- Every control is genuinely repolled every `POLL_INTERVAL` (`bin/loxone-
-  bridge`), not just favorites — an external change (the Loxone app, a
-  physical switch) shows up on the next cycle regardless of who caused it.
-  Polling is parallelized across `POLL_WORKERS` connections (`poll_all`)
-  specifically so that cycle stays close to `POLL_INTERVAL` even with a
-  couple hundred controls; polling sequentially over one connection was
-  measured taking several times the interval itself on an install that size,
-  which means every control was stale by the time it was finally read.
+- Every control is genuinely repolled, not just favorites — an external
+  change (the Loxone app, a physical switch) shows up on a later cycle
+  regardless of who caused it. Polling is parallelized across `POLL_WORKERS`
+  connections (`poll_all`) so the cycle stays as short as the rate ceiling
+  allows; polling sequentially over one connection was measured taking
+  several times the interval itself on a couple-hundred-control install.
+  How *often* that cycle runs is a load question, not a freshness one, and
+  belongs to the pacing rules above — freshness beyond the ceiling has to
+  come from a command's own confirmation or from push, never from raising
+  the request rate.
 - A *successful* command triggers an immediate single-control reread
   (`CommandWorker._confirm_entity`) instead of waiting for the next scheduled
   poll — this is what makes toggling a light feel instant rather than
@@ -168,6 +220,9 @@ that, and a regression in any one of them will look like the others:
 - Keep polling parsing incremental where practical. `apply_snapshot` in the
   bridge already only emits `state_changed` for entities that actually
   changed — do not regress that into unconditionally re-emitting everything.
+- Treat requests to the Miniserver as a budget, not a free resource. Any new
+  periodic request has to say what bounds its rate, and anything that reacts
+  to a failure has to be quieter than what it replaces, never louder.
 - Use `Style` and `Color` tokens in QML. Every `Text` must set
   `textFormat: Text.PlainText` and an explicit font family.
 - Sliders should send commands on release rather than on every movement.
@@ -204,6 +259,11 @@ real credentials, global Python packages, or internet access.
   before the first successful poll, retry indefinitely without exponential
   backoff, or leave a poller/command thread running after configuration
   removal.
+- Flag anything whose request rate against the Miniserver grows with the size
+  of the install, runs at full speed with no surface open, reconnects or
+  re-fetches the structure in response to a single failed read, or retries on
+  a fixed delay forever. Each of these on its own is enough to make a real
+  Miniserver unresponsive.
 - Flag keyring flows without terminal cleanup and an operation deadline.
 - Flag destructive credential actions without a clearly identified target and
   an appropriate confirmation or recovery path.

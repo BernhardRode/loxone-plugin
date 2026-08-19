@@ -205,6 +205,38 @@ QtObject {
     root.send({ op: "camera_pause" })
   }
 
+  // Polling is not free for the Miniserver either: it is a small embedded
+  // device answering one authenticated HTTP request per control per cycle,
+  // and a whole-house install polled at full speed around the clock is
+  // enough to stop it answering its own app. So the same viewer-count idea
+  // the camera uses applies here — full-speed polling while a surface is
+  // actually showing device state, a much slower cycle the rest of the time,
+  // which is most of the time. The bridge still polls while idle (an
+  // external change must not go unnoticed forever) and still re-reads a
+  // control immediately after a command, so nothing here delays feedback on
+  // something the user just touched.
+  property int stateViewerCount: 0
+
+  function registerStateViewer() {
+    root.stateViewerCount++
+    if (root.stateViewerCount === 1) root.send({ op: "poll_active" })
+  }
+
+  function unregisterStateViewer() {
+    root.stateViewerCount = Math.max(0, root.stateViewerCount - 1)
+    if (root.stateViewerCount === 0) root.send({ op: "poll_idle" })
+  }
+
+  // A restarted bridge starts with nothing on screen as far as it knows, but
+  // the surfaces that registered are still open — QML holds the counts, the
+  // bridge only holds what it was last told, so the counts have to be
+  // replayed or a popover that was open across a restart would sit there
+  // idle-polling with no camera.
+  function resendViewerState() {
+    if (root.cameraViewerCount > 0) root.resumeCamera()
+    if (root.stateViewerCount > 0) root.send({ op: "poll_active" })
+  }
+
   // Disjoint namespaces: one shared list would show ghosts after a mode switch.
   property var liveFavorites: []
   property var demoFavorites: []
@@ -569,6 +601,7 @@ QtObject {
     onReady: {
       root.phase = "connecting"
       root.pushCredentials()
+      root.resendViewerState()
     }
     onFailed: function(message) {
       root.phase = "error"

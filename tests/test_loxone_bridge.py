@@ -300,6 +300,9 @@ def test_light_controller_off_state_is_not_a_plain_zero():
     try:
         bridge.send({"op": "config", "url": server.url, "username": "admin",
                      "password": "secret", "verifyTls": False})
+        # This asserts on what a scheduled poll reads back, so it needs the
+        # full-speed cadence a visible panel gets.
+        bridge.send({"op": "poll_active"})
         states_ev = bridge.wait_for(lambda e: e["ev"] == "states")
         check("the off encoding reads as off, not on",
               states_ev is not None and states_ev["entities"][0]["state"] == "off",
@@ -311,6 +314,145 @@ def test_light_controller_off_state_is_not_a_plain_zero():
             and e["entity"]["entity_id"] == "light." + uuid, budget=6.0)
         check("a genuine mood value reads as on",
               changed is not None and changed["entity"]["state"] == "on", changed)
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def _many_switches(count):
+    structure = {"rooms": {}, "cats": {}, "controls": {}}
+    states = {}
+    uuids = []
+    for i in range(count):
+        uuid = "aaaaaaaa-0000-0000-0000-%012d" % i
+        uuids.append(uuid)
+        structure["controls"][uuid] = {"name": "Switch %d" % i, "type": "Switch"}
+        states[uuid] = {"Code": "200", "value": "0"}
+    return structure, states, uuids
+
+
+def test_polling_rate_is_capped_regardless_of_install_size():
+    print("load: a large structure slows the cycle down, it does not speed the requests up")
+    # Big enough that the old fixed-interval poller would have had to run far
+    # past POLL_MAX_RPS to finish a cycle every POLL_INTERVAL.
+    count = 80
+    structure, states, _ = _many_switches(count)
+    server = FakeLoxone(structure=structure, states=states)
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "username": "admin",
+                     "password": "secret", "verifyTls": False})
+        bridge.send({"op": "poll_active"})  # the worst case: someone is watching
+        connected = bridge.wait_for(
+            lambda e: e["ev"] == "phase" and e["phase"] == "connected", budget=30.0)
+        check("a large structure still connects", connected is not None)
+        time.sleep(4.0)
+        peak = server.peak_reads_per_second()
+        # POLL_MAX_RPS is 10/s; a one-second window can hold one extra request
+        # at either edge, and the fake server's own scheduling adds slack.
+        check("no one-second window exceeds the request ceiling",
+              peak <= 14, "peak %s reads/s" % peak)
+        check("polling did not simply stop instead",
+              len(server.state_reads()) >= count, len(server.state_reads()))
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_polling_backs_off_when_nothing_is_on_screen():
+    print("load: with no surface open the Miniserver is left alone between cycles")
+    server = FakeLoxone()
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "username": "admin",
+                     "password": "secret", "verifyTls": False})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        # The initial snapshot has been read by now; everything after this
+        # point is the idle cadence.
+        idle_start = time.monotonic()
+        time.sleep(6.0)
+        idle_reads = len(server.state_reads(since=idle_start))
+        # POLL_INTERVAL_IDLE is 30s: at the old fixed 2.5s cadence this window
+        # would have held roughly two dozen reads for a single control.
+        check("an unwatched Miniserver is barely touched",
+              idle_reads <= 1, "%d reads in 6s while idle" % idle_reads)
+
+        active_start = time.monotonic()
+        bridge.send({"op": "poll_active"})
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not server.state_reads(since=active_start):
+            time.sleep(0.05)
+        check("opening a surface polls immediately instead of waiting out the idle interval",
+              len(server.state_reads(since=active_start)) >= 1)
+
+        time.sleep(3.0)
+        active_reads = len(server.state_reads(since=active_start))
+        check("and then keeps polling at the visible cadence",
+              active_reads >= 2, "%d reads in 3s while active" % active_reads)
+
+        quiet_start = time.monotonic()
+        bridge.send({"op": "poll_idle"})
+        time.sleep(4.0)
+        check("closing it goes quiet again",
+              len(server.state_reads(since=quiet_start)) <= 1,
+              len(server.state_reads(since=quiet_start)))
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_a_failing_control_does_not_trigger_a_full_reconnect():
+    print("load: a control that stops answering does not re-fetch the structure")
+    structure, states, uuids = _many_switches(4)
+    server = FakeLoxone(structure=structure, states=states)
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "username": "admin",
+                     "password": "secret", "verifyTls": False})
+        bridge.send({"op": "poll_active"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+
+        server.drop_uuids.add(uuids[0])
+        server.states[uuids[1]]["value"] = "1"
+        changed = bridge.wait_for(
+            lambda e: e["ev"] == "state_changed"
+            and e["entity"]["entity_id"] == "switch." + uuids[1]
+            and e["entity"]["state"] == "on", budget=10.0)
+        check("the controls that do answer are still read and reported",
+              changed is not None)
+        check("the connection is not torn down over one bad control",
+              "error" not in bridge.phases() and bridge.phases().count("connected") == 1,
+              bridge.phases())
+        # Re-fetching LoxApp3.json is the heaviest thing the bridge can ask
+        # for; doing it in response to a slow Miniserver is the load spiral
+        # this guards against.
+        check("the structure was fetched exactly once",
+              server.requests.count("/data/LoxApp3.json") == 1,
+              server.requests.count("/data/LoxApp3.json"))
+    finally:
+        bridge.stop()
+        server.stop()
+
+
+def test_poll_connections_are_reused_across_cycles():
+    print("load: poll cycles reuse their connections instead of reconnecting each time")
+    structure, states, _ = _many_switches(6)
+    server = FakeLoxone(structure=structure, states=states)
+    bridge = BridgeProc()
+    try:
+        bridge.send({"op": "config", "url": server.url, "username": "admin",
+                     "password": "secret", "verifyTls": False})
+        bridge.send({"op": "poll_active"})
+        bridge.wait_for(lambda e: e["ev"] == "phase" and e["phase"] == "connected")
+        time.sleep(6.0)
+        reads = server.state_reads()
+        connections = {entry[2] for entry in reads}
+        # Several cycles have run by now. A handshake per worker per cycle —
+        # a full TLS handshake against a real Miniserver — is the expensive
+        # thing being avoided here, so connections must not scale with cycles.
+        check("several poll cycles ran", len(reads) >= 12, len(reads))
+        check("but they shared a small fixed set of connections",
+              len(connections) <= 4, len(connections))
     finally:
         bridge.stop()
         server.stop()
@@ -576,6 +718,10 @@ def main():
     test_light_controller_off_state_is_not_a_plain_zero()
     test_command_confirms_state_immediately()
     test_poll_covers_every_control_across_worker_chunks()
+    test_polling_rate_is_capped_regardless_of_install_size()
+    test_polling_backs_off_when_nothing_is_on_screen()
+    test_a_failing_control_does_not_trigger_a_full_reconnect()
+    test_poll_connections_are_reused_across_cycles()
     test_wrong_credentials_do_not_connect()
     test_password_never_in_output()
     test_unknown_entity_is_rejected()

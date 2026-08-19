@@ -32,6 +32,26 @@ rules.
 - TLS verification follows the `verifyTls` config flag (default off — real
   Miniservers overwhelmingly run a self-signed local certificate); when it is
   on, verification must actually run, not silently no-op.
+- Requests to the Miniserver are a budget, not a free resource — it is a
+  small embedded device that has to keep serving the Loxone app and the
+  house's own logic while the panel polls it. `POLL_MAX_RPS` (one shared
+  `RateLimiter` across all poll workers), `POLL_DUTY` (next cycle waits in
+  proportion to how long the last one took), `POLL_INTERVAL_IDLE` (the
+  cadence with no surface open) and `PollSession`'s reused connections are
+  what keep that budget bounded; see the root `AGENTS.md` design note before
+  changing any of them. Never let the request rate scale with the size of
+  the structure, and never add a new periodic request without saying what
+  bounds it.
+- Overload must not produce more load. A failed poll cycle backs off
+  (`POLL_FAILURES_BEFORE_RECONNECT`) instead of reconnecting, because a
+  reconnect re-fetches `LoxApp3.json` and re-polls everything — the heaviest
+  possible answer to a server that is already behind. `poll_all` therefore
+  returns `(entities, failed_count)` and tolerates partial failures: a
+  control that could not be read contributes no entity rather than a
+  fabricated one, which keeps "never publish a made-up state" without the
+  amplification. `Bridge.structure_cache` exists so a reconnect that does
+  happen skips the structure fetch, and is dropped whenever the attempt that
+  used it failed, so a structure that genuinely changed is still re-read.
 - Poller and command-worker threads each tag their messages with the epoch
   they were started under. The main loop must drop any message whose epoch
   does not match `self.epoch` — that is what makes a stale connection's
@@ -53,6 +73,12 @@ rules.
   looks exactly like a hang, not an error, so it is easy to ship silently.
   `tests/fake_camera.py`'s MJPEG test exists specifically to catch a
   regression here.
+- `LivePushThread` retries with exponential backoff up to
+  `LIVE_PUSH_RECONNECT_MAX`, reset only once a handshake actually succeeds.
+  Firmware that cannot do this handshake never will, and a fixed short retry
+  against it is a TCP/TLS connect, a public-key fetch and a WebSocket upgrade
+  every few seconds forever — permanent load on the Miniserver in service of
+  an enhancement that is best-effort by definition.
 - `LivePushThread` is its own independent lifecycle too, tied to the
   Miniserver's `self.epoch` (unlike the camera, it has nothing to run
   without a Miniserver connection) but never required for one to succeed —

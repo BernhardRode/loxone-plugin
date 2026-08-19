@@ -24,14 +24,21 @@ Item {
   property string tab: "connection"
 
   // A camera stream costs the camera something to serve for as long as the
-  // bridge is pulling frames — worth it while this overlay's Camera tab
-  // could show live status/feedback, not while it's closed entirely. Panel's
-  // popover registers the same way; the count in Service.qml is what keeps
-  // both surfaces being open at once from double-stopping each other.
+  // bridge is pulling frames, and full-speed polling costs the Miniserver
+  // the same way — both are worth it while this overlay could show live
+  // status, feedback, or entity state, not while it's closed entirely.
+  // Panel's popover registers the same way; the counts in Service.qml are
+  // what keep both surfaces being open at once from double-stopping each
+  // other.
   onOpenedChanged: {
     if (!root.service) return
-    if (root.opened) root.service.registerCameraViewer()
-    else root.service.unregisterCameraViewer()
+    if (root.opened) {
+      root.service.registerCameraViewer()
+      root.service.registerStateViewer()
+    } else {
+      root.service.unregisterCameraViewer()
+      root.service.unregisterStateViewer()
+    }
   }
 
   // Local until Connect, so a half-typed URL or password never reaches the

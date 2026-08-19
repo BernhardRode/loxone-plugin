@@ -47,6 +47,28 @@ settings, `r` refreshes, `esc` closes, `tab` moves to the next bar panel.
 [`AGENTS.md`](AGENTS.md) for why, and for how state attribute names are
 derived.
 
+## How hard it works your Miniserver
+
+A Miniserver is a small embedded device that also has to serve the Loxone app
+and run the house, so the panel deliberately keeps its polling on a budget
+rather than reading everything as fast as it can:
+
+- State reads are capped at a fixed requests-per-second ceiling shared by all
+  poll workers, so a large install means a longer refresh cycle rather than a
+  busier Miniserver.
+- With the popover and Settings both closed, polling drops to a slow
+  background cadence. Opening either one refreshes immediately and switches
+  back to the fast cadence for as long as it's open.
+- Anything you actually press is re-read straight away, so feedback on your
+  own actions never waits for the next cycle.
+- A Miniserver that answers slowly gets polled less often, and a control that
+  stops answering does not cause a reconnect — the panel keeps the last state
+  it genuinely read for that one control and carries on.
+
+The practical effect is that a change made elsewhere (the Loxone app, a
+physical switch) can take up to half a minute to show up while nothing is on
+screen, and appears within seconds once you open the panel.
+
 ## Camera
 
 The Settings → Camera tab adds a single HTTP(S) camera stream to the bottom

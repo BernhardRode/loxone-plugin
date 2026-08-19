@@ -31,12 +31,18 @@ Panel {
   readonly property var tabs: serviceReady ? loxone.tabs : []
 
   onOpenedChanged: {
-    // A camera stream costs the camera something to serve for as long as
-    // it's being pulled — only worth it while this popover (or Settings'
-    // Camera tab) is actually showing it.
+    // Both a camera stream and full-speed Miniserver polling cost the
+    // device on the other end something to serve for as long as they run —
+    // only worth it while this popover (or Settings) is actually showing
+    // what they produce.
     if (serviceReady) {
-      if (opened) loxone.registerCameraViewer()
-      else loxone.unregisterCameraViewer()
+      if (opened) {
+        loxone.registerCameraViewer()
+        loxone.registerStateViewer()
+      } else {
+        loxone.unregisterCameraViewer()
+        loxone.unregisterStateViewer()
+      }
     }
     if (!opened) {
       expandedEntityId = ""
