@@ -60,7 +60,14 @@ rules.
   the poller/command worker, and for the poller to reach `connected` whether
   or not it ever does. Never let a failure in it affect `self.phase` or
   `self.backoff` — those belong to the Miniserver connection, which this is
-  explicitly *not* part of establishing. `_mood_state`'s `"[778]"` encoding
+  explicitly *not* part of establishing. Reconnects use exponential backoff with jitter
+  (`LIVE_PUSH_BACKOFF_START`/`LIVE_PUSH_BACKOFF_MAX`), reset only after a
+  handshake actually succeeds — not a flat retry delay, so a Miniserver that
+  is struggling is not also hit with a full RSA/WS handshake every few
+  seconds forever. The RSA public key is cached on the thread across
+  reconnect attempts within one epoch (`_pubkey_cache`) and only dropped if
+  a cached-key handshake actually fails, so a healthy retry loop fetches it
+  once, not once per attempt. `_mood_state`'s `"[778]"` encoding
   is a live-verified fact about the Miniserver, not a guess — do not "fix" it
   back to a `value == 0` check without re-verifying against a real Miniserver
   first (see `tests/test_loxone_ws_protocol.py` and the design notes in root

@@ -204,6 +204,21 @@ def test_mood_state_interpretation():
           bridge.LivePushThread._mood_state("not json") is None)
 
 
+def test_live_push_backoff_growth():
+    section("LivePushThread._next_backoff: doubles and caps, starts small")
+    check("starts at LIVE_PUSH_BACKOFF_START",
+          bridge.LIVE_PUSH_BACKOFF_START == 5.0)
+    check("doubles once",
+          bridge.LivePushThread._next_backoff(5.0) == 10.0)
+    check("doubles again",
+          bridge.LivePushThread._next_backoff(10.0) == 20.0)
+    check("caps at LIVE_PUSH_BACKOFF_MAX",
+          bridge.LivePushThread._next_backoff(50.0) == bridge.LIVE_PUSH_BACKOFF_MAX)
+    check("never exceeds the cap once already at it",
+          bridge.LivePushThread._next_backoff(bridge.LIVE_PUSH_BACKOFF_MAX)
+          == bridge.LIVE_PUSH_BACKOFF_MAX)
+
+
 # ---------------------------------------------------------------- end to end
 
 
@@ -222,6 +237,7 @@ def test_live_push_end_to_end():
         cfg = {"host": server.host, "port": server.port, "use_tls": False,
                "username": "admin", "password": "secret", "verify_tls": False}
         thread = bridge.LivePushThread(1, out_queue, cfg, {state_uuid: entity_id})
+        thread._backoff = 999.0  # prove a real reset happens, not a no-op
         thread.start()
         try:
             kinds = []
@@ -236,6 +252,8 @@ def test_live_push_end_to_end():
                     break
             check("connects and authenticates",
                   any(k[0] == "light_push_available" for k in kinds), kinds)
+            check("resets backoff after a successful handshake",
+                  thread._backoff == bridge.LIVE_PUSH_BACKOFF_START, thread._backoff)
             push = next((k for k in kinds if k[0] == "light_push"), None)
             check("receives the queued push", push is not None, kinds)
             check("resolves to the right entity", push and push[2] == entity_id, push)
@@ -276,6 +294,75 @@ def test_live_push_wrong_password_is_unavailable_not_a_crash():
         server.stop()
 
 
+def test_live_push_reuses_cached_pubkey_across_reconnects():
+    section("LivePushThread: refetches the pubkey once, not on every retry")
+    if not openssl_available():
+        print("  skip (openssl not available)")
+        return
+    state_uuid = "15c2a003-024c-770c-ffff7239db7fa8de"
+    server = FakeLoxoneWs(expected_user="admin", expected_password="secret")
+    # Force every attempt to fail authentication (wrong password) so the
+    # thread reconnects repeatedly within the test's time budget — the
+    # public key fetch happens before that failure, so this isolates
+    # whether the *fetch* is being repeated, independent of whether the
+    # overall handshake ever succeeds.
+    orig_start, orig_max = bridge.LIVE_PUSH_BACKOFF_START, bridge.LIVE_PUSH_BACKOFF_MAX
+    bridge.LIVE_PUSH_BACKOFF_START, bridge.LIVE_PUSH_BACKOFF_MAX = 0.05, 0.2
+    try:
+        out_queue = queue.Queue()
+        cfg = {"host": server.host, "port": server.port, "use_tls": False,
+               "username": "admin", "password": "wrong", "verify_tls": False}
+        thread = bridge.LivePushThread(1, out_queue, cfg, {state_uuid: "light.x"})
+        thread.start()
+        try:
+            time.sleep(1.0)  # several reconnect attempts at this backoff
+        finally:
+            thread.stop_event.set()
+            thread.join(timeout=2.0)
+        check("reconnected more than once",
+              server.ws_handshakes >= 2, server.ws_handshakes)
+        check("fetched the public key only once",
+              server.pubkey_requests == 1, server.pubkey_requests)
+    finally:
+        bridge.LIVE_PUSH_BACKOFF_START, bridge.LIVE_PUSH_BACKOFF_MAX = orig_start, orig_max
+        server.stop()
+
+
+def test_live_push_invalidates_pubkey_cache_on_keyexchange_failure():
+    section("LivePushThread: clears pubkey cache when keyexchange fails")
+    if not openssl_available():
+        print("  skip (openssl not available)")
+        return
+    state_uuid = "15c2a003-024c-770c-ffff7239db7fa8de"
+    server = FakeLoxoneWs(expected_user="admin", expected_password="secret")
+    # A second, independent keypair whose public half does not match the
+    # server's real private key, so encrypting with it and sending the
+    # ciphertext to the server is genuinely undecryptable there.
+    wrong_keypair = _make_keypair()
+    try:
+        out_queue = queue.Queue()
+        cfg = {"host": server.host, "port": server.port, "use_tls": False,
+               "username": "admin", "password": "secret", "verify_tls": False}
+        thread = bridge.LivePushThread(1, out_queue, cfg, {state_uuid: "light.x"})
+        # Pre-seed cache with a mismatched pubkey: the server's own keypair
+        # will fail to decrypt what LivePushThread encrypts with this key,
+        # hitting the real production keyexchange-failure path (500) rather
+        # than a synthetic server flag.
+        thread._pubkey_cache = bridge.parse_rsa_public_key_pem(wrong_keypair.pub_pem)
+        thread.start()
+        try:
+            # Give it time to attempt connection and fail at keyexchange
+            time.sleep(0.5)
+        finally:
+            thread.stop_event.set()
+            thread.join(timeout=2.0)
+        check("cache was cleared after keyexchange failed",
+              thread._pubkey_cache is None, thread._pubkey_cache)
+    finally:
+        wrong_keypair.close()
+        server.stop()
+
+
 def main():
     test_rsa_round_trip()
     test_rsa_rejects_malformed_der()
@@ -283,8 +370,11 @@ def main():
     test_binary_header_parsing()
     test_text_state_parsing()
     test_mood_state_interpretation()
+    test_live_push_backoff_growth()
     test_live_push_end_to_end()
     test_live_push_wrong_password_is_unavailable_not_a_crash()
+    test_live_push_reuses_cached_pubkey_across_reconnects()
+    test_live_push_invalidates_pubkey_cache_on_keyexchange_failure()
 
     print()
     if FAILURES:
