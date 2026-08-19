@@ -181,6 +181,7 @@ security-sensitive change, run the full suite:
 
 ```bash
 PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 python3 tests/test_loxone_bridge.py
+PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 python3 tests/test_loxone_ws_protocol.py
 python3 tests/test_service_contract.py
 python3 tests/test_qml_style.py
 node tests/test_config.js

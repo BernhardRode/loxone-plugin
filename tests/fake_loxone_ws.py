@@ -42,9 +42,16 @@ class _Keypair:
         self.pub_pem = open(self.pub_path).read()
 
     def decrypt(self, ciphertext):
+        # rsa_pkcs1_implicit_rejection is a Bleichenbacher-attack countermeasure
+        # that OpenSSL enables by default: instead of erroring on invalid PKCS#1
+        # padding (e.g. ciphertext encrypted for a different key), it silently
+        # returns deterministic garbage with exit code 0. Tests that rely on
+        # decrypt() failing loudly for a genuinely mismatched key need that
+        # countermeasure off.
         result = subprocess.run(
             [OPENSSL, "pkeyutl", "-decrypt", "-inkey", self.priv_path,
-             "-pkeyopt", "rsa_padding_mode:pkcs1"],
+             "-pkeyopt", "rsa_padding_mode:pkcs1",
+             "-pkeyopt", "rsa_pkcs1_implicit_rejection:0"],
             input=ciphertext, capture_output=True, check=True)
         return result.stdout
 
@@ -134,6 +141,9 @@ class FakeLoxoneWs:
         self.key2_salt = "deadbeef"
         self._pushes = []  # [(state_uuid_str, text)], sent after subscribe
         self._push_lock = threading.Lock()
+        self._counter_lock = threading.Lock()
+        self.pubkey_requests = 0
+        self.ws_handshakes = 0
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._srv.bind(("127.0.0.1", 0))
@@ -178,6 +188,8 @@ class FakeLoxoneWs:
             path = request_line.split(b" ")[1].decode()
 
             if path.startswith("/jdev/sys/getPublicKey"):
+                with self._counter_lock:
+                    self.pubkey_requests += 1
                 pem_oneline = self.keypair.pub_pem.replace(
                     "-----BEGIN PUBLIC KEY-----", "-----BEGIN CERTIFICATE-----"
                 ).replace("-----END PUBLIC KEY-----", "-----END CERTIFICATE-----")
@@ -203,6 +215,8 @@ class FakeLoxoneWs:
                 pass
 
     def _serve_ws(self, conn, head, buf):
+        with self._counter_lock:
+            self.ws_handshakes += 1
         client_key = None
         for line in head.split(b"\r\n")[1:]:
             if line.lower().startswith(b"sec-websocket-key:"):
