@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.3.0](https://github.com/BernhardRode/dev.ebbo.loxone/compare/dev.ebbo.loxone-v0.2.1...dev.ebbo.loxone-v0.3.0) (2026-08-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* rename plugin id to dev.ebbo.loxone
+* the plugin now targets a Loxone Miniserver instead of Home Assistant. The plugin id changed from `hass` to `loxone`, IPC commands moved from `omarchy-shell hass ...` to `omarchy-shell loxone ...`, and `bin/hass-bridge` was replaced by `bin/loxone-bridge` with a different NDJSON protocol and entity id scheme. Existing Home Assistant configuration and entity ids are not compatible.
+
+### Features
+
+* add area grouping setting ([a87ff3c](https://github.com/BernhardRode/dev.ebbo.loxone/commit/a87ff3c36a5d48b9fde344c12de8b6f1b78ad33d))
+* add on/off controls for climate entities ([6459ef5](https://github.com/BernhardRode/dev.ebbo.loxone/commit/6459ef55c57b0cc7110734b6bcc61d8868cfc0e1)), closes [#1](https://github.com/BernhardRode/dev.ebbo.loxone/issues/1)
+* convert plugin from Home Assistant to Loxone Miniserver ([10e3d4c](https://github.com/BernhardRode/dev.ebbo.loxone/commit/10e3d4c1a8bd99008abdaf2253a2a7807a50a5a4))
+* initial Home Assistant panel for Omarchy ([cb89e75](https://github.com/BernhardRode/dev.ebbo.loxone/commit/cb89e754ae520e37ee4fa3734d0d8fcf84d5abdd))
+
+
+### Bug Fixes
+
+* **bridge:** backoff + pubkey caching for LivePushThread reconnects ([6194fc0](https://github.com/BernhardRode/dev.ebbo.loxone/commit/6194fc008e8d972ac16b245003a10333a06783ea))
+* **bridge:** cache LivePushThread's RSA public key across reconnects ([86d6c5f](https://github.com/BernhardRode/dev.ebbo.loxone/commit/86d6c5fcbd6034bdda1397f6ba9dc6fee900f872))
+* **bridge:** exponential backoff + jitter on LivePushThread reconnects ([23530e4](https://github.com/BernhardRode/dev.ebbo.loxone/commit/23530e42f369f94ec6ca0cfc77a8a269b54d590e))
+
+
+### Code Refactoring
+
+* rename plugin id to dev.ebbo.loxone ([53cf783](https://github.com/BernhardRode/dev.ebbo.loxone/commit/53cf783f7a95abe2246f9a39fe12abec8b415171))
+
 ## [0.2.1](https://github.com/BernhardRode/loxone-plugin/compare/loxone-v0.2.0...loxone-v0.2.1) (2026-08-19)
 
 
