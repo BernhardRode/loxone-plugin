@@ -9,13 +9,13 @@ import "Model.js" as Model
 // the service owns the devices and the connection.
 Panel {
   id: root
-  moduleName: "loxone"
-  ipcTarget: "loxone"
+  moduleName: "dev.ebbo.loxone"
+  ipcTarget: "dev.ebbo.loxone"
   // We own the target's single IpcHandler, so the methods below can sit
   // alongside the base open/close/toggle.
   manageIpc: false
 
-  readonly property var loxone: bar && bar.shell ? bar.shell.serviceFor("loxone") : null
+  readonly property var loxone: bar && bar.shell ? bar.shell.serviceFor("dev.ebbo.loxone") : null
   readonly property bool serviceReady: loxone !== null
   readonly property string phase: serviceReady ? loxone.phase : "idle"
 
@@ -86,7 +86,7 @@ Panel {
   function openSettings(tab) {
     if (!bar || !bar.shell || typeof bar.shell.summon !== "function") return
     close()
-    bar.shell.summon("loxone", JSON.stringify({ tab: tab || root.defaultSettingsTab() }))
+    bar.shell.summon("dev.ebbo.loxone", JSON.stringify({ tab: tab || root.defaultSettingsTab() }))
   }
 
   function expandCursor() {
@@ -128,7 +128,7 @@ Panel {
   implicitHeight: button.implicitHeight
 
   IpcHandler {
-    target: "loxone"
+    target: "dev.ebbo.loxone"
 
     function open(): void { root.open() }
     function close(): void { root.close() }

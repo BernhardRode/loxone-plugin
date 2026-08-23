@@ -64,13 +64,13 @@ in either way.
 The panel is reachable over the shell's IPC, so a device can go on a keybind:
 
 ```bash
-omarchy-shell loxone toggleEntity light.1fbc668c-005c-7471-ffffed57184a04d2
-omarchy-shell loxone activate scene.<uuid>            # fire a pushbutton
-omarchy-shell loxone expand climate.<uuid>             # opens the panel, unfolded
-omarchy-shell loxone favorite light.<uuid>              # add to / remove from the panel
-omarchy-shell loxone status
-omarchy-shell loxone settings             # connection settings
-omarchy-shell loxone devices              # device picker
+omarchy-shell dev.ebbo.loxone toggleEntity light.1fbc668c-005c-7471-ffffed57184a04d2
+omarchy-shell dev.ebbo.loxone activate scene.<uuid>            # fire a pushbutton
+omarchy-shell dev.ebbo.loxone expand climate.<uuid>             # opens the panel, unfolded
+omarchy-shell dev.ebbo.loxone favorite light.<uuid>              # add to / remove from the panel
+omarchy-shell dev.ebbo.loxone status
+omarchy-shell dev.ebbo.loxone settings             # connection settings
+omarchy-shell dev.ebbo.loxone devices              # device picker
 ```
 
 Entity ids are `<domain>.<control-uuid>` — find a control's UUID in the
@@ -99,15 +99,15 @@ omarchy plugin add https://github.com/bernhardrode/loxone-plugin.git --enable
 For local development, symlink the checkout instead:
 
 ```bash
-ln -sfn "$PWD" ~/.config/omarchy/plugins/loxone
+ln -sfn "$PWD" ~/.config/omarchy/plugins/dev.ebbo.loxone
 omarchy restart shell
-omarchy plugin enable loxone
+omarchy plugin enable dev.ebbo.loxone
 ```
 
 ## Setup
 
 Click the gear in the panel header, or press `s` with the panel open. From a
-terminal: `omarchy-shell loxone settings`, or `omarchy-shell loxone devices`
+terminal: `omarchy-shell dev.ebbo.loxone settings`, or `omarchy-shell dev.ebbo.loxone devices`
 to open the device picker.
 
 Enter your Miniserver's URL (e.g. `https://192.168.1.77`), its username and
@@ -122,8 +122,8 @@ one.
 ## Debugging
 
 ```bash
-omarchy-shell loxone status     # what the widget sees
-omarchy-shell loxone toggle     # open/close the panel
+omarchy-shell dev.ebbo.loxone status     # what the widget sees
+omarchy-shell dev.ebbo.loxone toggle     # open/close the panel
 omarchy plugin validate .       # check the manifest before committing
 ```
 

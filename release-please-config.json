@@ -6,7 +6,7 @@
   "packages": {
     ".": {
       "release-type": "simple",
-      "package-name": "loxone",
+      "package-name": "dev.ebbo.loxone",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         {
