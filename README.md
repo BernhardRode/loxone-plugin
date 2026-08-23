@@ -93,7 +93,7 @@ crypto dependency.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/bernhardrode/loxone-plugin.git --enable
+omarchy plugin add https://github.com/bernhardrode/dev.ebbo.loxone.git --enable
 ```
 
 For local development, symlink the checkout instead:
