@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "loxone",
+  "id": "dev.ebbo.loxone",
   "name": "Loxone",
   "version": "0.2.1",
   "author": "Bernhard Rode",

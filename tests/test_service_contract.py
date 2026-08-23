@@ -130,7 +130,7 @@ def main():
     try:
         manifest = json.load(open(MANIFEST_PATH, encoding="utf-8"))
         valid_manifest = (manifest.get("schemaVersion") == 1
-                          and manifest.get("id") == "loxone"
+                          and manifest.get("id") == "dev.ebbo.loxone"
                           and set(manifest.get("entryPoints", {}))
                           == {"service", "barWidget", "overlay"})
     except (OSError, ValueError):
